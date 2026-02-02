@@ -28,12 +28,29 @@ if (!MD_TOKEN) {
   }
 }
 
-function queryAll(sql, params = []) {
+/**
+ * Escape básico para strings em SQL (duplica aspas simples).
+ * Isso evita quebrar o SQL se alguém digitar: O'Hara
+ * (Para produção, o ideal é usar prepared statements compatíveis com o driver.)
+ */
+function sqlEscape(str) {
+  return String(str ?? "").replace(/'/g, "''");
+}
+
+/**
+ * CNPJ básico seguro: só dígitos, máximo 8.
+ */
+function sanitizeCnpjBasico(digits) {
+  const only = String(digits ?? "").replace(/\D/g, "").slice(0, 8);
+  return only;
+}
+
+function queryAll(sql) {
   return new Promise((resolve, reject) => {
     if (!db) return reject(new Error("MotherDuck não está configurado (token/DB)."));
 
     const conn = db.connect();
-    conn.all(sql, params, (err, rows) => {
+    conn.all(sql, (err, rows) => {
       try { conn.close(); } catch {}
       if (err) reject(err);
       else resolve(rows);
@@ -60,30 +77,37 @@ app.get("/schema", async (_, res) => {
 
 app.post("/chat", async (req, res) => {
   try {
-    const q = String(req.body?.query || "").trim();
-    if (!q) return res.status(400).json({ answer: "Consulta vazia." });
+    const qRaw = String(req.body?.query || "").trim();
+    if (!qRaw) return res.status(400).json({ answer: "Consulta vazia." });
 
-    const digits = q.replace(/\D/g, "");
+    const digits = qRaw.replace(/\D/g, "");
     const isCnpj = digits.length >= 8;
 
     let rows = [];
+
     if (isCnpj) {
-      const cnpj_basico = digits.slice(0, 8);
-      rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 5`,
-        [cnpj_basico]
-      );
+      const cnpj_basico = sanitizeCnpjBasico(digits);
+
+      // DuckDB Node: sem "?" placeholder -> SQL direto
+      rows = await queryAll(`
+        SELECT *
+        FROM chat_rfb.main.empresas
+        WHERE cnpj_basico = '${cnpj_basico}'
+        LIMIT 5
+      `);
     } else {
-      const like = `%${q.toUpperCase()}%`;
-      // tenta campos comuns sem derrubar (se não existir, cai no catch)
-      rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas
-         WHERE upper(razao_social) LIKE ?
-            OR upper(nome_fantasia) LIKE ?
-            OR upper(nome) LIKE ?
-         LIMIT 5`,
-        [like, like, like]
-      );
+      const q = sqlEscape(qRaw.toUpperCase());
+
+      // LIKE com escape básico (evita quebrar por aspas)
+      // Observação: se suas colunas não existirem, o try/catch vai devolver erro JSON, sem derrubar
+      rows = await queryAll(`
+        SELECT *
+        FROM chat_rfb.main.empresas
+        WHERE upper(razao_social) LIKE '%${q}%'
+           OR upper(nome_fantasia) LIKE '%${q}%'
+           OR upper(nome) LIKE '%${q}%'
+        LIMIT 5
+      `);
     }
 
     if (!rows.length) return res.json({ answer: "Nenhum resultado encontrado." });
@@ -99,7 +123,10 @@ app.post("/chat", async (req, res) => {
     });
   } catch (e) {
     console.error("ERRO /chat:", e);
-    res.status(500).json({ answer: "Erro consultando MotherDuck.", error: String(e?.message || e) });
+    res.status(500).json({
+      answer: "Erro consultando MotherDuck.",
+      error: String(e?.message || e)
+    });
   }
 });
 
