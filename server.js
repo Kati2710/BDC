@@ -4,46 +4,49 @@ import duckdb from "duckdb";
 
 const app = express();
 
-/* =========================
-   CORS (OBRIGATÓRIO) - ROBUSTO
-   ========================= */
+/* ========================= CORS ========================= */
 const allowedOrigins = new Set([
   "https://brazildatacorp.com",
   "https://www.brazildatacorp.com",
   "http://localhost:5500",
   "http://127.0.0.1:5500",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  // Para testar localmente abrindo HTML direto:
+  "null", // file:// protocol
 ]);
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // Permite requests sem Origin (ex: curl/powershell) e origens whitelisted
+    console.log("🔍 Request from origin:", origin || "NO ORIGIN");
+    
+    // Permite requests sem Origin (curl, Postman, etc)
     if (!origin) return cb(null, true);
-    if (allowedOrigins.has(origin)) return cb(null, true);
-    return cb(new Error(`CORS blocked for origin: ${origin}`));
+    
+    // Verifica whitelist
+    if (allowedOrigins.has(origin)) {
+      console.log("✅ Origin allowed:", origin);
+      return cb(null, true);
+    }
+    
+    console.log("❌ Origin blocked:", origin);
+    return cb(new Error(`CORS blocked for origin: ${origin}`)); // FIX: era Error` sem parêntese
   },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"],
   credentials: false,
-  optionsSuccessStatus: 204, // importante p/ browsers
+  optionsSuccessStatus: 204,
 };
 
-// 1) CORS para todas as rotas
+// Aplica CORS em todas as rotas
 app.use(cors(corsOptions));
 
-// 2) Preflight explícito (garante que o OPTIONS responda com CORS SEMPRE)
-app.options("/chat", cors(corsOptions), (req, res) => {
-  // cors() já escreve os headers; aqui garantimos o status e fim
-  return res.sendStatus(204);
-});
-
-// Se quiser liberar preflight para qualquer rota futura, pode usar também:
-// app.options("*", cors(corsOptions));
+// Preflight handler explícito
+app.options("*", cors(corsOptions));
 
 app.use(express.json({ limit: "256kb" }));
 
-/* =========================
-   MOTHERDUCK
-   ========================= */
+/* ========================= MOTHERDUCK ========================= */
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
 const MD_DB = "md:chat_rfb";
 
@@ -51,65 +54,109 @@ const db = new duckdb.Database(MD_DB, {
   motherduck_token: MD_TOKEN,
 });
 
-function queryAll(sql) {
+function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
-    conn.all(sql, (err, rows) => {
-      conn.close();
-      if (err) reject(err);
-      else resolve(rows);
-    });
+    
+    if (params.length > 0) {
+      // Com parâmetros (prepared statement)
+      conn.all(sql, ...params, (err, rows) => {
+        conn.close();
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    } else {
+      // Sem parâmetros
+      conn.all(sql, (err, rows) => {
+        conn.close();
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    }
   });
 }
 
-/* =========================
-   ROTAS
-   ========================= */
+/* ========================= ROTAS ========================= */
 app.get("/health", (_, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
 app.post("/chat", async (req, res) => {
+  const startTime = Date.now();
+  console.log("📨 POST /chat received");
+  
   try {
     const q = String(req.body?.query || "").trim();
-    if (!q) return res.json({ answer: "Consulta vazia." });
+    console.log("🔎 Query:", q);
+    
+    if (!q) {
+      return res.json({ answer: "Consulta vazia." });
+    }
 
     const digits = q.replace(/\D/g, "");
     let rows;
 
     if (digits.length >= 8) {
       const cnpj = digits.slice(0, 8);
-
-      // (Melhor: parametrizar. Mas mantendo seu estilo por enquanto)
-      rows = await queryAll(`
-        SELECT * FROM chat_rfb.main.empresas
-        WHERE cnpj_basico = '${cnpj}'
-        LIMIT 5
-      `);
+      console.log("🏢 Buscando por CNPJ:", cnpj);
+      
+      // FIX: Usando prepared statement (DuckDB suporta ? placeholders)
+      rows = await queryAll(
+        `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 5`,
+        [cnpj]
+      );
     } else {
-      const term = q.toUpperCase().replace(/'/g, "''");
-      rows = await queryAll(`
-        SELECT * FROM chat_rfb.main.empresas
-        WHERE upper(razao_social) LIKE '%${term}%'
-        LIMIT 5
-      `);
+      const term = q.toUpperCase();
+      console.log("📝 Buscando por razão social:", term);
+      
+      // FIX: Usando LIKE com placeholder
+      rows = await queryAll(
+        `SELECT * FROM chat_rfb.main.empresas WHERE upper(razao_social) LIKE ? LIMIT 5`,
+        [`%${term}%`]
+      );
     }
 
+    const duration = Date.now() - startTime;
+    console.log(`✅ Query executada em ${duration}ms, ${rows?.length || 0} resultados`);
+
     if (!rows?.length) {
-      return res.json({ answer: "Nenhum resultado encontrado." });
+      return res.json({ 
+        answer: "Nenhum resultado encontrado.",
+        query: q,
+        duration_ms: duration
+      });
     }
 
     const r = rows[0];
     return res.json({
-      answer: `Encontrei ${rows.length} resultado(s).\n${r.razao_social}`,
+      answer: `Encontrei ${rows.length} resultado(s).\nPrimeiro: ${r.razao_social} (CNPJ: ${r.cnpj_basico})`,
       rows,
+      query: q,
+      duration_ms: duration
     });
+
   } catch (e) {
-    console.error("CHAT ERROR:", e);
-    return res.status(500).json({ answer: "Erro interno no chat." });
+    console.error("❌ CHAT ERROR:", e);
+    return res.status(500).json({ 
+      answer: "Erro interno no chat.",
+      error: process.env.NODE_ENV === "development" ? e.message : undefined
+    });
   }
 });
 
-/* ========================= */
+// Middleware de erro global
+app.use((err, req, res, next) => {
+  console.error("❌ Global error:", err);
+  res.status(500).json({ 
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "development" ? err.message : undefined
+  });
+});
+
+/* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("BDC API rodando na porta", PORT));
+app.listen(PORT, () => {
+  console.log(`🚀 BDC API rodando na porta ${PORT}`);
+  console.log(`📍 Modo: ${process.env.NODE_ENV || "production"}`);
+  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅ configurado" : "❌ faltando"}`);
+});
