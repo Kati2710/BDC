@@ -22,38 +22,62 @@ console.log("MD DB:", MD_DB);
 console.log("MD TOKEN present:", !!MD_TOKEN);
 
 let db = null;
+let dbInitPromise = null;
 
-if (!MD_TOKEN) {
-  console.warn("AVISO: MOTHERDUCK_TOKEN não definido. /health funciona, /schema e /chat vão falhar.");
-} else {
-  try {
-    db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
-    console.log("DuckDB/MotherDuck: init OK");
-  } catch (e) {
-    console.error("Falha ao inicializar DuckDB:", e);
-    db = null;
-  }
-}
-
-// Escape básico para strings em SQL
+/** Escape básico para strings em SQL */
 function sqlEscape(str) {
   return String(str ?? "").replace(/'/g, "''");
 }
 
-// Apenas dígitos (máx 8)
+/** Apenas dígitos (máx 8) */
 function sanitizeCnpjBasico(input) {
   return String(input ?? "").replace(/\D/g, "").slice(0, 8);
 }
 
 /**
- * IMPORTANTÍSSIMO:
- * DuckDB Node: não usar parâmetros.
- * Esta função aceita apenas (sql) e NUNCA (sql, params).
+ * Inicializa DuckDB/MotherDuck só quando necessário.
+ * Isso evita crash durante boot.
  */
-function queryAll(sql) {
+async function getDb() {
+  if (!MD_TOKEN) throw new Error("MOTHERDUCK_TOKEN não definido no Render (Environment).");
+
+  if (db) return db;
+
+  if (!dbInitPromise) {
+    dbInitPromise = new Promise((resolve, reject) => {
+      try {
+        const instance = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
+
+        // testa conexão com uma query simples
+        const conn = instance.connect();
+        conn.all("SELECT 1 AS ok;", (err) => {
+          try { conn.close(); } catch {}
+          if (err) return reject(err);
+
+          console.log("DuckDB/MotherDuck: init OK (lazy)");
+          db = instance;
+          resolve(db);
+        });
+      } catch (e) {
+        reject(e);
+      }
+    }).catch((e) => {
+      // se falhar, permite tentar de novo depois
+      dbInitPromise = null;
+      throw e;
+    });
+  }
+
+  return dbInitPromise;
+}
+
+/**
+ * Query sem parâmetros (DuckDB Node).
+ */
+async function queryAll(sql) {
+  const instance = await getDb();
   return new Promise((resolve, reject) => {
-    if (!db) return reject(new Error("MotherDuck não está configurado (token/DB)."));
-    const conn = db.connect();
+    const conn = instance.connect();
     conn.all(sql, (err, rows) => {
       try { conn.close(); } catch {}
       if (err) return reject(err);
@@ -62,18 +86,22 @@ function queryAll(sql) {
   });
 }
 
-// Health
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-// Schema mais robusto e simples
+/**
+ * /schema robusto:
+ * lista tabelas e descreve "empresas" se existir.
+ */
 app.get("/schema", async (_, res) => {
   try {
     const tables = await queryAll(`SHOW TABLES FROM chat_rfb.main;`);
 
-    // tentar descrever empresas se existir
-    const tableNames = tables.map(t => String(t?.name ?? Object.values(t)[0] ?? "").toLowerCase());
+    const names = (tables || []).map(t =>
+      String(t?.name ?? Object.values(t || {})[0] ?? "").toLowerCase()
+    );
+
     let empresasColumns = [];
-    if (tableNames.includes("empresas")) {
+    if (names.includes("empresas")) {
       empresasColumns = await queryAll(`DESCRIBE chat_rfb.main.empresas;`);
     }
 
@@ -84,7 +112,6 @@ app.get("/schema", async (_, res) => {
   }
 });
 
-// Chat MVP (sem placeholders)
 app.post("/chat", async (req, res) => {
   try {
     const qRaw = String(req.body?.query || "").trim();
@@ -97,7 +124,6 @@ app.post("/chat", async (req, res) => {
 
     if (isCnpj) {
       const cnpj_basico = sanitizeCnpjBasico(digits);
-
       rows = await queryAll(`
         SELECT *
         FROM chat_rfb.main.empresas
@@ -106,7 +132,6 @@ app.post("/chat", async (req, res) => {
       `);
     } else {
       const q = sqlEscape(qRaw.toUpperCase());
-
       rows = await queryAll(`
         SELECT *
         FROM chat_rfb.main.empresas
@@ -128,7 +153,10 @@ app.post("/chat", async (req, res) => {
     });
   } catch (e) {
     console.error("ERRO /chat:", e);
-    res.status(500).json({ answer: "Erro consultando MotherDuck.", error: String(e?.message || e) });
+    res.status(500).json({
+      answer: "Erro consultando MotherDuck.",
+      error: String(e?.message || e)
+    });
   }
 });
 
