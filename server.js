@@ -12,7 +12,7 @@ const app = express();
 app.use(express.json({ limit: "256kb" }));
 
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
-const MD_DB = process.env.MOTHERDUCK_DB || "md:chat_rfb";
+const MD_DB = process.env.MOTHERDUCK_DB || "md:chat_rfb"; // pode manter assim
 
 let db = null;
 
@@ -28,53 +28,81 @@ if (!MD_TOKEN) {
   }
 }
 
-/**
- * Escape básico para strings em SQL (duplica aspas simples).
- * Isso evita quebrar o SQL se alguém digitar: O'Hara
- * (Para produção, o ideal é usar prepared statements compatíveis com o driver.)
- */
+/** Escape básico para string em SQL */
 function sqlEscape(str) {
   return String(str ?? "").replace(/'/g, "''");
 }
 
-/**
- * CNPJ básico seguro: só dígitos, máximo 8.
- */
-function sanitizeCnpjBasico(digits) {
-  const only = String(digits ?? "").replace(/\D/g, "").slice(0, 8);
-  return only;
+/** Apenas dígitos (máx 8) */
+function sanitizeCnpjBasico(input) {
+  return String(input ?? "").replace(/\D/g, "").slice(0, 8);
 }
 
+/**
+ * IMPORTANTE: DuckDB Node aqui roda sem parâmetros.
+ * NUNCA usar conn.all(sql, params).
+ */
 function queryAll(sql) {
   return new Promise((resolve, reject) => {
     if (!db) return reject(new Error("MotherDuck não está configurado (token/DB)."));
 
-    const conn = db.connect();
+    let conn;
+    try {
+      conn = db.connect();
+    } catch (e) {
+      return reject(e);
+    }
+
     conn.all(sql, (err, rows) => {
       try { conn.close(); } catch {}
-      if (err) reject(err);
-      else resolve(rows);
+      if (err) return reject(err);
+      resolve(rows);
     });
   });
 }
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
+/**
+ * /schema robusto:
+ * 1) lista tabelas no schema main
+ * 2) descreve a tabela empresas (se existir)
+ */
 app.get("/schema", async (_, res) => {
   try {
-    const rows = await queryAll(`
-      SELECT table_schema, table_name, column_name, data_type
-      FROM information_schema.columns
-      WHERE table_schema='main' AND table_name IN ('empresas','empresas_chat')
-      ORDER BY table_name, ordinal_position
-    `);
-    res.json({ ok: true, rows });
+    const tables = await queryAll(`SHOW TABLES FROM chat_rfb.main;`);
+
+    // tenta encontrar "empresas" na lista
+    const hasEmpresas = (tables || []).some((t) => {
+      const name = t?.name || t?.table_name || Object.values(t || {})[0];
+      return String(name).toLowerCase() === "empresas";
+    });
+
+    let empresasColumns = [];
+    if (hasEmpresas) {
+      // DESCRIBE é mais “seguro” do que information_schema em alguns ambientes
+      empresasColumns = await queryAll(`DESCRIBE chat_rfb.main.empresas;`);
+    }
+
+    res.json({
+      ok: true,
+      tables,
+      empresasColumns
+    });
   } catch (e) {
     console.error("ERRO /schema:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
+/**
+ * /chat MVP:
+ * - se digitar 8+ dígitos: trata como cnpj_basico
+ * - senão: busca por razão social (e tenta nome_fantasia se existir)
+ *
+ * Obs: para não quebrar, a busca por nome usa somente razao_social.
+ * Depois que o /schema mostrar as colunas reais, a gente melhora.
+ */
 app.post("/chat", async (req, res) => {
   try {
     const qRaw = String(req.body?.query || "").trim();
@@ -88,36 +116,34 @@ app.post("/chat", async (req, res) => {
     if (isCnpj) {
       const cnpj_basico = sanitizeCnpjBasico(digits);
 
-      // DuckDB Node: sem "?" placeholder -> SQL direto
       rows = await queryAll(`
         SELECT *
         FROM chat_rfb.main.empresas
         WHERE cnpj_basico = '${cnpj_basico}'
-        LIMIT 5
+        LIMIT 5;
       `);
     } else {
       const q = sqlEscape(qRaw.toUpperCase());
 
-      // LIKE com escape básico (evita quebrar por aspas)
-      // Observação: se suas colunas não existirem, o try/catch vai devolver erro JSON, sem derrubar
       rows = await queryAll(`
         SELECT *
         FROM chat_rfb.main.empresas
         WHERE upper(razao_social) LIKE '%${q}%'
-           OR upper(nome_fantasia) LIKE '%${q}%'
-           OR upper(nome) LIKE '%${q}%'
-        LIMIT 5
+        LIMIT 5;
       `);
     }
 
-    if (!rows.length) return res.json({ answer: "Nenhum resultado encontrado." });
+    if (!rows || rows.length === 0) {
+      return res.json({ answer: "Nenhum resultado encontrado." });
+    }
 
     const r = rows[0];
+
     res.json({
       answer:
         `Encontrei ${rows.length} resultado(s).\n` +
-        `• ${r.razao_social ?? r.nome ?? "—"}\n` +
-        `• CNPJ: ${r.cnpj_basico ?? r.cnpj ?? "—"}\n` +
+        `• ${r.razao_social ?? "—"}\n` +
+        `• CNPJ básico: ${r.cnpj_basico ?? "—"}\n` +
         `• UF: ${r.uf ?? "—"}\n`,
       rows
     });
