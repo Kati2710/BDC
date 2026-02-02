@@ -1,6 +1,9 @@
 import express from "express";
 import duckdb from "duckdb";
 
+console.log("BOOT: starting server...");
+console.log("NODE:", process.version);
+
 process.on("unhandledRejection", (reason) => {
   console.error("UNHANDLED REJECTION:", reason);
 });
@@ -12,7 +15,11 @@ const app = express();
 app.use(express.json({ limit: "256kb" }));
 
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
-const MD_DB = process.env.MOTHERDUCK_DB || "md:chat_rfb"; // pode manter assim
+const MD_DB = process.env.MOTHERDUCK_DB || "md:chat_rfb";
+
+console.log("PORT env:", process.env.PORT);
+console.log("MD DB:", MD_DB);
+console.log("MD TOKEN present:", !!MD_TOKEN);
 
 let db = null;
 
@@ -28,31 +35,25 @@ if (!MD_TOKEN) {
   }
 }
 
-/** Escape básico para string em SQL */
+// Escape básico para strings em SQL
 function sqlEscape(str) {
   return String(str ?? "").replace(/'/g, "''");
 }
 
-/** Apenas dígitos (máx 8) */
+// Apenas dígitos (máx 8)
 function sanitizeCnpjBasico(input) {
   return String(input ?? "").replace(/\D/g, "").slice(0, 8);
 }
 
 /**
- * IMPORTANTE: DuckDB Node aqui roda sem parâmetros.
- * NUNCA usar conn.all(sql, params).
+ * IMPORTANTÍSSIMO:
+ * DuckDB Node: não usar parâmetros.
+ * Esta função aceita apenas (sql) e NUNCA (sql, params).
  */
 function queryAll(sql) {
   return new Promise((resolve, reject) => {
     if (!db) return reject(new Error("MotherDuck não está configurado (token/DB)."));
-
-    let conn;
-    try {
-      conn = db.connect();
-    } catch (e) {
-      return reject(e);
-    }
-
+    const conn = db.connect();
     conn.all(sql, (err, rows) => {
       try { conn.close(); } catch {}
       if (err) return reject(err);
@@ -61,48 +62,29 @@ function queryAll(sql) {
   });
 }
 
+// Health
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-/**
- * /schema robusto:
- * 1) lista tabelas no schema main
- * 2) descreve a tabela empresas (se existir)
- */
+// Schema mais robusto e simples
 app.get("/schema", async (_, res) => {
   try {
     const tables = await queryAll(`SHOW TABLES FROM chat_rfb.main;`);
 
-    // tenta encontrar "empresas" na lista
-    const hasEmpresas = (tables || []).some((t) => {
-      const name = t?.name || t?.table_name || Object.values(t || {})[0];
-      return String(name).toLowerCase() === "empresas";
-    });
-
+    // tentar descrever empresas se existir
+    const tableNames = tables.map(t => String(t?.name ?? Object.values(t)[0] ?? "").toLowerCase());
     let empresasColumns = [];
-    if (hasEmpresas) {
-      // DESCRIBE é mais “seguro” do que information_schema em alguns ambientes
+    if (tableNames.includes("empresas")) {
       empresasColumns = await queryAll(`DESCRIBE chat_rfb.main.empresas;`);
     }
 
-    res.json({
-      ok: true,
-      tables,
-      empresasColumns
-    });
+    res.json({ ok: true, tables, empresasColumns });
   } catch (e) {
     console.error("ERRO /schema:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-/**
- * /chat MVP:
- * - se digitar 8+ dígitos: trata como cnpj_basico
- * - senão: busca por razão social (e tenta nome_fantasia se existir)
- *
- * Obs: para não quebrar, a busca por nome usa somente razao_social.
- * Depois que o /schema mostrar as colunas reais, a gente melhora.
- */
+// Chat MVP (sem placeholders)
 app.post("/chat", async (req, res) => {
   try {
     const qRaw = String(req.body?.query || "").trim();
@@ -133,12 +115,9 @@ app.post("/chat", async (req, res) => {
       `);
     }
 
-    if (!rows || rows.length === 0) {
-      return res.json({ answer: "Nenhum resultado encontrado." });
-    }
+    if (!rows.length) return res.json({ answer: "Nenhum resultado encontrado." });
 
     const r = rows[0];
-
     res.json({
       answer:
         `Encontrei ${rows.length} resultado(s).\n` +
@@ -149,10 +128,7 @@ app.post("/chat", async (req, res) => {
     });
   } catch (e) {
     console.error("ERRO /chat:", e);
-    res.status(500).json({
-      answer: "Erro consultando MotherDuck.",
-      error: String(e?.message || e)
-    });
+    res.status(500).json({ answer: "Erro consultando MotherDuck.", error: String(e?.message || e) });
   }
 });
 
