@@ -12,67 +12,56 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:5500",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  // Para testar localmente abrindo HTML direto:
-  "null", // file:// protocol
+  "null" // file:// protocol
 ]);
 
 const corsOptions = {
   origin: (origin, cb) => {
     console.log("🔍 Request from origin:", origin || "NO ORIGIN");
-    
+
     // Permite requests sem Origin (curl, Postman, etc)
     if (!origin) return cb(null, true);
-    
-    // Verifica whitelist
+
     if (allowedOrigins.has(origin)) {
       console.log("✅ Origin allowed:", origin);
       return cb(null, true);
     }
-    
+
     console.log("❌ Origin blocked:", origin);
-    return cb(new Error(`CORS blocked for origin: ${origin}`)); // FIX: era Error` sem parêntese
+    return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"],
   credentials: false,
-  optionsSuccessStatus: 204,
+  optionsSuccessStatus: 204
 };
 
-// Aplica CORS em todas as rotas
 app.use(cors(corsOptions));
-
-// Preflight handler explícito
 app.options("*", cors(corsOptions));
-
 app.use(express.json({ limit: "256kb" }));
 
 /* ========================= MOTHERDUCK ========================= */
-const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
+const MD_TOKEN = process.env.MOTHERDUCK_TOKEN; // configure no Render
 const MD_DB = "md:chat_rfb";
 
 const db = new duckdb.Database(MD_DB, {
-  motherduck_token: MD_TOKEN,
+  motherduck_token: MD_TOKEN
 });
 
+/**
+ * queryAll(sql, params)
+ * - DuckDB Node aceita params como ARRAY: conn.all(sql, params, cb)
+ * - Isso evita bug/ambiguidade com spread ...params
+ */
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
-    
-    if (params.length > 0) {
-      // Com parâmetros (prepared statement)
-      conn.all(sql, ...params, (err, rows) => {
-        conn.close();
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    } else {
-      // Sem parâmetros
-      conn.all(sql, (err, rows) => {
-        conn.close();
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    }
+
+    conn.all(sql, params, (err, rows) => {
+      conn.close();
+      if (err) return reject(err);
+      resolve(rows);
+    });
   });
 }
 
@@ -84,34 +73,36 @@ app.get("/health", (_, res) => {
 app.post("/chat", async (req, res) => {
   const startTime = Date.now();
   console.log("📨 POST /chat received");
-  
+
   try {
     const q = String(req.body?.query || "").trim();
     console.log("🔎 Query:", q);
-    
+
     if (!q) {
       return res.json({ answer: "Consulta vazia." });
     }
 
     const digits = q.replace(/\D/g, "");
-    let rows;
+    let rows = [];
 
     if (digits.length >= 8) {
       const cnpj = digits.slice(0, 8);
       console.log("🏢 Buscando por CNPJ:", cnpj);
-      
-      // FIX: Usando prepared statement (DuckDB suporta ? placeholders)
+
       rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 5`,
+        `SELECT * FROM chat_rfb.main.empresas
+         WHERE cnpj_basico = ?
+         LIMIT 5`,
         [cnpj]
       );
     } else {
       const term = q.toUpperCase();
       console.log("📝 Buscando por razão social:", term);
-      
-      // FIX: Usando LIKE com placeholder
+
       rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas WHERE upper(razao_social) LIKE ? LIMIT 5`,
+        `SELECT * FROM chat_rfb.main.empresas
+         WHERE upper(razao_social) LIKE ?
+         LIMIT 5`,
         [`%${term}%`]
       );
     }
@@ -120,7 +111,7 @@ app.post("/chat", async (req, res) => {
     console.log(`✅ Query executada em ${duration}ms, ${rows?.length || 0} resultados`);
 
     if (!rows?.length) {
-      return res.json({ 
+      return res.json({
         answer: "Nenhum resultado encontrado.",
         query: q,
         duration_ms: duration
@@ -137,7 +128,8 @@ app.post("/chat", async (req, res) => {
 
   } catch (e) {
     console.error("❌ CHAT ERROR:", e);
-    return res.status(500).json({ 
+
+    return res.status(500).json({
       answer: "Erro interno no chat.",
       error: process.env.NODE_ENV === "development" ? e.message : undefined
     });
@@ -147,7 +139,7 @@ app.post("/chat", async (req, res) => {
 // Middleware de erro global
 app.use((err, req, res, next) => {
   console.error("❌ Global error:", err);
-  res.status(500).json({ 
+  res.status(500).json({
     error: "Internal server error",
     message: process.env.NODE_ENV === "development" ? err.message : undefined
   });
@@ -155,6 +147,7 @@ app.use((err, req, res, next) => {
 
 /* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
   console.log(`🚀 BDC API rodando na porta ${PORT}`);
   console.log(`📍 Modo: ${process.env.NODE_ENV || "production"}`);
