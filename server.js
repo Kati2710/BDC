@@ -5,17 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const app = express();
 
-/* ========================= CONFIG ========================= */
-const PORT = process.env.PORT || 10000;
-
-// MotherDuck
-const MD_DB = "md:chat_rfb";
-const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
-
-// Claude (Anthropic)
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-
-// CORS whitelist
+/* ========================= CORS ========================= */
 const allowedOrigins = new Set([
   "https://brazildatacorp.com",
   "https://www.brazildatacorp.com",
@@ -23,30 +13,19 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:5500",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  "null" // file://
+  "null"
 ]);
 
-/* ========================= CORS ========================= */
-const corsOptions = {
+app.use(cors({
   origin: (origin, cb) => {
-    console.log("🔍 Origin:", origin || "NO ORIGIN");
-
-    // sem Origin: curl/postman
     if (!origin) return cb(null, true);
-
-    if (allowedOrigins.has(origin)) return cb(null, true);
-
-    // bloqueia sem "jogar erro" (evita vários bugs de preflight)
-    return cb(null, false);
+    return cb(null, allowedOrigins.has(origin));
   },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Accept"],
   optionsSuccessStatus: 204
-};
+}));
 
-app.use(cors(corsOptions));
-
-// Preflight sempre responde 204
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -54,12 +33,12 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "256kb" }));
 
-/* ========================= DUCKDB / MOTHERDUCK ========================= */
-const db = new duckdb.Database(MD_DB, {
-  motherduck_token: MD_TOKEN
-});
+/* ========================= MOTHERDUCK ========================= */
+const MD_DB = "md:chat_rfb";
+const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
 
-// ✅ queryAll CORRETO: params como array
+const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
+
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
@@ -71,49 +50,89 @@ function queryAll(sql, params = []) {
   });
 }
 
-/* ========================= CLAUDE (HUMANIZER) ========================= */
-const anthropic = ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: ANTHROPIC_API_KEY })
-  : null;
+/* ========================= CLAUDE ========================= */
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-async function humanizeAnswer({ query, rows }) {
-  // se não tem chave ou não tem resultado, nem chama
-  if (!anthropic) return null;
-  if (!rows?.length) return null;
+const SCHEMA_HINT = `
+Base: chat_rfb.main.empresas
+Colunas disponíveis:
+cnpj_basico, razao_social, natureza_juridica_codigo, natureza_juridica,
+qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social,
+porte_codigo, porte, ente_federativo, cnpj, matriz_filial_codigo, matriz_filial,
+nome_fantasia, situacao_cadastral_codigo, situacao_cadastral,
+data_situacao_cadastral, motivo_situacao_codigo, motivo_situacao,
+data_inicio_atividade, cnae_fiscal, cnae_descricao, cnaes_secundarios,
+tipo_logradouro, logradouro, numero, complemento, bairro, cep, uf,
+municipio_codigo, municipio, ddd, telefone, email, situacao_especial,
+opcao_simples, data_opcao_simples, data_exclusao_simples, opcao_mei,
+data_opcao_mei, data_exclusao_mei
+`;
 
-  // manda só dados necessários (reduz custo e evita vazamento)
-  const compact = rows.slice(0, 5).map((r) => ({
-    cnpj_basico: r.cnpj_basico,
-    razao_social: r.razao_social,
-    natureza_juridica: r.natureza_juridica,
-    municipio: r.municipio,
-    uf: r.uf
-  }));
+function sanitizeSQL(sql) {
+  const s = String(sql || "").trim();
 
+  // Só permite SELECT
+  if (!/^select\b/i.test(s)) throw new Error("SQL inválida: apenas SELECT é permitido.");
+
+  // Bloqueia comandos perigosos
+  const blocked = /\b(insert|update|delete|drop|alter|create|truncate|copy|attach|detach|pragma|call)\b/i;
+  if (blocked.test(s)) throw new Error("SQL bloqueada: comando não permitido.");
+
+  // Bloqueia múltiplas statements
+  if (s.includes(";")) throw new Error("SQL bloqueada: não use ';'.");
+
+  // Garante LIMIT pra não explodir custo/latência (se não tiver)
+  if (!/\blimit\b/i.test(s)) return s + " LIMIT 50";
+
+  return s;
+}
+
+async function llmToSQL(userQuery) {
   const resp = await anthropic.messages.create({
     model: "claude-3-5-sonnet-latest",
-    max_tokens: 220,
+    max_tokens: 260,
+    temperature: 0,
+    system:
+      "Você converte perguntas em SQL DuckDB. " +
+      "Use APENAS a tabela chat_rfb.main.empresas e as colunas fornecidas. " +
+      "Gere UMA ÚNICA query SELECT. " +
+      "Não use ';'. " +
+      "Sempre use LIMIT quando retornar linhas. " +
+      "Se for contagem, use COUNT(*). " +
+      "Não invente tabelas/colunas.",
+    messages: [{
+      role: "user",
+      content:
+        `${SCHEMA_HINT}\n` +
+        `Pergunta: ${userQuery}\n\n` +
+        "Responda SOMENTE com a SQL (sem markdown, sem explicações)."
+    }]
+  });
+
+  const sql = resp?.content?.[0]?.text || "";
+  return sanitizeSQL(sql);
+}
+
+async function llmExplain(userQuery, sql, rows) {
+  const resp = await anthropic.messages.create({
+    model: "claude-3-5-sonnet-latest",
+    max_tokens: 240,
     temperature: 0.6,
     system:
       "Você é um assistente brasileiro, objetivo e amigável. " +
-      "Use APENAS os dados fornecidos. " +
-      "Não invente informações, não assuma nada. " +
-      "Se algo não constar, diga que não consta.",
-    messages: [
-      {
-        role: "user",
-        content:
-          `Consulta do usuário: ${query}\n\n` +
-          `Resultados (JSON):\n${JSON.stringify(compact, null, 2)}\n\n` +
-          "Crie uma resposta humana em pt-BR com:\n" +
-          "1) Uma frase dizendo quantos resultados encontrou.\n" +
-          "2) Destaque do 1º resultado.\n" +
-          "3) Uma sugestão do que pesquisar a seguir (ex.: termo mais específico, cidade/UF, CNPJ completo).\n"
-      }
-    ]
+      "Use APENAS os dados retornados. Não invente nada. " +
+      "Se rows estiver vazio, diga que não encontrou.",
+    messages: [{
+      role: "user",
+      content:
+        `Pergunta: ${userQuery}\n` +
+        `SQL executada: ${sql}\n` +
+        `Resultado (JSON): ${JSON.stringify(rows)}\n\n` +
+        "Explique o resultado de forma curta e útil em pt-BR."
+    }]
   });
 
-  return resp?.content?.[0]?.text || null;
+  return resp?.content?.[0]?.text || "Sem resposta.";
 }
 
 /* ========================= ROTAS ========================= */
@@ -122,100 +141,45 @@ app.get("/health", (_, res) => {
     ok: true,
     timestamp: new Date().toISOString(),
     motherduck: MD_TOKEN ? "configured" : "missing",
-    claude: ANTHROPIC_API_KEY ? "configured" : "missing"
+    claude: process.env.ANTHROPIC_API_KEY ? "configured" : "missing"
   });
 });
 
 app.post("/chat", async (req, res) => {
-  const startTime = Date.now();
-
+  const start = Date.now();
   try {
-    console.log("📨 POST /chat");
-    console.log("📦 Body:", req.body);
-
     const q = String(req.body?.query || "").trim();
-    if (!q) {
-      return res.json({ answer: "Consulta vazia." });
-    }
+    if (!q) return res.json({ answer: "Consulta vazia." });
 
-    const digits = q.replace(/\D/g, "");
-    let rows = [];
+    // 1) Claude gera SQL
+    const sql = await llmToSQL(q);
 
-    if (digits.length >= 8) {
-      const cnpj = digits.slice(0, 8);
-      console.log("🏢 Buscando por CNPJ:", cnpj);
+    // 2) Executa no MotherDuck
+    const rows = await queryAll(sql);
 
-      rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas
-         WHERE cnpj_basico = ?
-         LIMIT 5`,
-        [cnpj]
-      );
-    } else {
-      const term = q.toUpperCase();
-      console.log("📝 Buscando por razão social:", term);
-
-      rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas
-         WHERE upper(razao_social) LIKE ?
-         LIMIT 5`,
-        [`%${term}%`]
-      );
-    }
-
-    const duration = Date.now() - startTime;
-
-    if (!rows?.length) {
-      return res.json({
-        answer: "Nenhum resultado encontrado.",
-        query: q,
-        duration_ms: duration
-      });
-    }
-
-    // fallback básico
-    const r = rows[0];
-    const basicAnswer =
-      `Encontrei ${rows.length} resultado(s).\n` +
-      `Primeiro: ${r.razao_social} (CNPJ: ${r.cnpj_basico})`;
-
-    // ✅ tenta humanizar com Claude (se configurado)
-    let answer = basicAnswer;
-    try {
-      const human = await humanizeAnswer({ query: q, rows });
-      if (human) answer = human;
-    } catch (e) {
-      console.error("⚠️ Claude error (fallback para básico):", e?.message || e);
-    }
+    // 3) Claude humaniza resposta
+    const answer = await llmExplain(q, sql, rows);
 
     return res.json({
       answer,
+      sql,
       rows,
-      query: q,
-      duration_ms: duration
+      duration_ms: Date.now() - start
     });
+
   } catch (e) {
-    console.error("❌ CHAT ERROR:", e);
+    console.error("❌ /chat error:", e);
     return res.status(500).json({
-      answer: "Erro interno no chat.",
-      error: process.env.NODE_ENV === "development" ? e.message : undefined
+      answer: "Erro interno.",
+      error: process.env.NODE_ENV === "development" ? String(e.message || e) : undefined
     });
   }
 });
 
-// erro global
-app.use((err, req, res, next) => {
-  console.error("❌ Global error:", err);
-  res.status(500).json({
-    error: "Internal server error",
-    message: process.env.NODE_ENV === "development" ? err.message : undefined
-  });
-});
-
 /* ========================= START ========================= */
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 BDC API rodando na porta ${PORT}`);
-  console.log(`📍 Modo: ${process.env.NODE_ENV || "production"}`);
-  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅ configurado" : "❌ faltando"}`);
-  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? "✅ configurado" : "❌ faltando"}`);
+  console.log(`🚀 BDC API on :${PORT}`);
+  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅" : "❌"}`);
+  console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✅" : "❌"}`);
 });
