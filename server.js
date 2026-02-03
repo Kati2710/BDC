@@ -116,7 +116,7 @@ async function llmToSQL(userQuery) {
   if (!anthropic) throw new Error("Claude não configurado");
 
   const resp = await anthropic.messages.create({
-    model: "claude-3-5-sonnet-20240620",
+    model: "claude-sonnet-4-5-20250929",
     max_tokens: 300,
     temperature: 0,
     system: "Você é um especialista em SQL DuckDB. Gere queries usando APENAS a tabela e colunas fornecidas. Responda APENAS a SQL.",
@@ -133,7 +133,7 @@ async function llmExplain(userQuery, sql, rows) {
   if (!anthropic) return null;
 
   const resp = await anthropic.messages.create({
-    model: "claude-3-5-sonnet-20240620",
+    model: "claude-sonnet-4-5-20250929",
     max_tokens: 280,
     temperature: 0.7,
     system: "Você é um assistente brasileiro. Seja objetivo e use separadores de milhar.",
