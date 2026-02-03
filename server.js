@@ -282,9 +282,12 @@ app.post("/chat", async (req, res) => {
     try {
       if (rows?.length) {
         answer = await llmExplain(q, sql, rows);
+        console.log("✅ Claude explicou:", answer?.slice(0, 50));
       }
     } catch (e) {
+      console.log("⚠️ llmExplain falhou:", e?.message || e);
       debug.explain_error = String(e?.message || e);
+      // Não quebra - continua sem explicação
     }
 
     const duration = Date.now() - start;
