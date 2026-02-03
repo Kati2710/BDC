@@ -36,51 +36,36 @@ app.use(express.json({ limit: "256kb" }));
 /* ========================= MOTHERDUCK ========================= */
 const MD_DB = "md:chat_rfb";
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
-
 const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 
-function queryAll(sql, params = []) {
+function queryAll(sql) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
-    // Se params é vazio, não passa nada
-    if (!params || params.length === 0) {
-      conn.all(sql, (err, rows) => {
-        conn.close();
-        if (err) return reject(err);
-        resolve(rows);
-      });
-    } else {
-      conn.all(sql, params, (err, rows) => {
-        conn.close();
-        if (err) return reject(err);
-        resolve(rows);
-      });
-    }
+    conn.all(sql, (err, rows) => {
+      conn.close();
+      if (err) return reject(err);
+      resolve(rows);
+    });
   });
 }
 
 /* ========================= CACHE ========================= */
 const queryCache = new Map();
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutos
+const CACHE_TTL = 10 * 60 * 1000;
 
-async function cachedQueryAll(sql, params = []) {
-  const cacheKey = JSON.stringify({ sql, params });
-  
-  if (queryCache.has(cacheKey)) {
-    const { data, timestamp } = queryCache.get(cacheKey);
+async function cachedQueryAll(sql) {
+  if (queryCache.has(sql)) {
+    const { data, timestamp } = queryCache.get(sql);
     if (Date.now() - timestamp < CACHE_TTL) {
       console.log("📦 Cache HIT");
       return data;
     }
-    queryCache.delete(cacheKey);
+    queryCache.delete(sql);
   }
 
-  const data = (!params || params.length === 0) 
-    ? await queryAll(sql) 
-    : await queryAll(sql, params);
-    
-  queryCache.set(cacheKey, { data, timestamp: Date.now() });
-  console.log("💾 Cache MISS - salvando");
+  const data = await queryAll(sql);
+  queryCache.set(sql, { data, timestamp: Date.now() });
+  console.log("💾 Cache MISS");
   return data;
 }
 
@@ -97,47 +82,30 @@ Colunas principais:
 - situacao_cadastral: situação atual - VALORES: "ATIVA", "SUSPENSA", "BAIXADA", "NULA", "INAPTA"
 - uf: sigla do estado (ex: "SP", "RJ", "MG", "RS")
 - municipio: nome da cidade em MAIÚSCULAS (ex: "SAO PAULO", "RIO DE JANEIRO")
-- cnae_fiscal: código CNAE principal da atividade
-- cnae_descricao: descrição da atividade econômica
 - porte: tamanho da empresa - VALORES: "ME", "EPP", "DEMAIS"
 - opcao_mei: se é MEI - VALORES: "S" (sim) ou "N" (não)
-- natureza_juridica: tipo societário (ex: "SOCIEDADE ANONIMA FECHADA", "SOCIEDADE LIMITADA")
-- capital_social: capital social em reais
-- nome_fantasia: nome fantasia (pode ser NULL)
-- data_inicio_atividade: data de abertura
-- email: email de contato (pode ser NULL)
+- natureza_juridica: tipo societário
 
-REGRAS CRÍTICAS:
-1. NÃO existe coluna 'pais' ou 'país' - TODAS as empresas já são do Brasil
-2. Para empresas ativas use: WHERE situacao_cadastral = 'ATIVA'
-3. Para MEI use: WHERE opcao_mei = 'S'
-4. Nomes estão em MAIÚSCULAS sem acentos (use UPPER() para comparar)
-5. Para buscar nome: WHERE razao_social LIKE '%TERMO%' ou WHERE nome_fantasia LIKE '%TERMO%'
-6. NUNCA invente colunas que não existem no schema acima
+REGRAS:
+1. TODAS as empresas são do Brasil (não existe coluna 'pais')
+2. Para empresas ativas: WHERE situacao_cadastral = 'ATIVA'
+3. Para MEI: WHERE opcao_mei = 'S'
+4. Nomes em MAIÚSCULAS sem acentos
 `;
 
 function sanitizeSQL(sql) {
   let s = String(sql || "").trim();
-
-  // Remove markdown
   s = s.replace(/```[\s\S]*?```/g, (m) => m.replace(/```sql|```/gi, "").trim());
-  
-  // Remove ; final
   s = s.replace(/;+\s*$/g, "").trim();
 
-  // Pega do primeiro SELECT
   const idx = s.toLowerCase().indexOf("select");
-  if (idx === -1) throw new Error("SQL inválida: não encontrei SELECT.");
+  if (idx === -1) throw new Error("SQL inválida");
   s = s.slice(idx).trim();
 
-  // Bloqueia comandos perigosos
   const blocked = /\b(insert|update|delete|drop|alter|create|truncate|copy|attach|detach|pragma|call)\b/i;
-  if (blocked.test(s)) throw new Error("SQL bloqueada: comando não permitido.");
+  if (blocked.test(s)) throw new Error("SQL bloqueada");
+  if (s.includes(";")) throw new Error("SQL bloqueada");
 
-  // Bloqueia múltiplas instruções
-  if (s.includes(";")) throw new Error("SQL bloqueada: múltiplas instruções.");
-
-  // LIMIT automático para listas (não agregações)
   const isAggregate = /\bcount\s*\(|\bgroup\s+by\b|\bsum\s*\(|\bavg\s*\(|\bmin\s*\(|\bmax\s*\(/i.test(s);
   if (!isAggregate && !/\blimit\b/i.test(s)) s += " LIMIT 50";
 
@@ -145,29 +113,20 @@ function sanitizeSQL(sql) {
 }
 
 async function llmToSQL(userQuery) {
-  if (!anthropic) throw new Error("Claude não configurado (ANTHROPIC_API_KEY ausente).");
+  if (!anthropic) throw new Error("Claude não configurado");
 
   const resp = await anthropic.messages.create({
     model: "claude-3-5-sonnet-latest",
     max_tokens: 300,
     temperature: 0,
-    system:
-      "Você é um especialista em SQL DuckDB para dados da Receita Federal brasileira. " +
-      "Gere queries PRECISAS e OTIMIZADAS usando APENAS a tabela e colunas fornecidas. " +
-      "NUNCA invente colunas. NUNCA use colunas que não existem no schema. " +
-      "Para contagens use COUNT(*). Para listas use LIMIT. " +
-      "Responda APENAS a SQL, sem explicações, sem markdown.",
+    system: "Você é um especialista em SQL DuckDB. Gere queries usando APENAS a tabela e colunas fornecidas. Responda APENAS a SQL.",
     messages: [{
       role: "user",
-      content:
-        `${SCHEMA_HINT}\n\n` +
-        `Pergunta do usuário: "${userQuery}"\n\n` +
-        "Gere SOMENTE a SQL DuckDB (query única, sem markdown, sem explicação):"
+      content: `${SCHEMA_HINT}\n\nPergunta: "${userQuery}"\n\nGere a SQL:`
     }]
   });
 
-  const raw = resp?.content?.[0]?.text || "";
-  return sanitizeSQL(raw);
+  return sanitizeSQL(resp?.content?.[0]?.text || "");
 }
 
 async function llmExplain(userQuery, sql, rows) {
@@ -177,20 +136,10 @@ async function llmExplain(userQuery, sql, rows) {
     model: "claude-3-5-sonnet-latest",
     max_tokens: 280,
     temperature: 0.7,
-    system:
-      "Você é um assistente brasileiro experiente em dados empresariais. " +
-      "Seja objetivo, amigável e preciso. " +
-      "Use APENAS os dados fornecidos - não invente informações. " +
-      "Se o resultado for vazio, informe de forma clara. " +
-      "Para números grandes, use separadores de milhar.",
+    system: "Você é um assistente brasileiro. Seja objetivo e use separadores de milhar.",
     messages: [{
       role: "user",
-      content:
-        `Pergunta do usuário: ${userQuery}\n` +
-        `SQL executada: ${sql}\n` +
-        `Resultado (primeiras linhas): ${JSON.stringify(rows.slice(0, 3))}\n` +
-        `Total de linhas: ${rows.length}\n\n` +
-        "Explique o resultado em português brasileiro de forma útil e concisa."
+      content: `Pergunta: ${userQuery}\nSQL: ${sql}\nResultado: ${JSON.stringify(rows.slice(0, 3))}\n\nExplique em pt-BR:`
     }]
   });
 
@@ -202,79 +151,42 @@ async function fallbackQuery(userQuery) {
   const q = String(userQuery || "").trim();
   const qUp = q.toUpperCase();
 
-  // 1) MEI
-  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("MEI")) {
-    const sql = `
-      SELECT COUNT(*) AS total
-      FROM chat_rfb.main.empresas
-      WHERE opcao_mei = 'S'
-    `;
+  // MEI
+  if (qUp.includes("MEI")) {
+    const sql = "SELECT COUNT(*) AS total FROM chat_rfb.main.empresas WHERE opcao_mei = 'S'";
     const rows = await cachedQueryAll(sql);
     return { sql, rows, mode: "count" };
   }
 
-  // 2) Empresas ativas
-  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("ATIV")) {
-    const sql = `
-      SELECT COUNT(*) AS total
-      FROM chat_rfb.main.empresas
-      WHERE situacao_cadastral = 'ATIVA'
-    `;
+  // Ativas
+  if (qUp.includes("ATIV")) {
+    const sql = "SELECT COUNT(*) AS total FROM chat_rfb.main.empresas WHERE situacao_cadastral = 'ATIVA'";
     const rows = await cachedQueryAll(sql);
     return { sql, rows, mode: "count" };
   }
 
-  // 3) Por porte (ME, EPP)
-  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && (qUp.includes("MICROEMPRESA") || qUp.includes(" ME "))) {
-    const sql = `
-      SELECT COUNT(*) AS total
-      FROM chat_rfb.main.empresas
-      WHERE porte = 'ME'
-    `;
-    const rows = await cachedQueryAll(sql);
-    return { sql, rows, mode: "count" };
-  }
-
-  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("EPP")) {
-    const sql = `
-      SELECT COUNT(*) AS total
-      FROM chat_rfb.main.empresas
-      WHERE porte = 'EPP'
-    `;
-    const rows = await cachedQueryAll(sql);
-    return { sql, rows, mode: "count" };
-  }
-
-  // 4) Por UF
-  const ufs = ["SP", "RJ", "MG", "RS", "PR", "SC", "BA", "PE", "CE", "DF", "GO", "ES", "PA", "AM", "MA", "PB", "RN", "AL", "SE", "PI", "MT", "MS", "AC", "RO", "RR", "AP", "TO"];
+  // UF
+  const ufs = ["SP", "RJ", "MG", "RS", "PR", "SC", "BA", "PE", "CE", "DF"];
   for (const uf of ufs) {
-    if (qUp.includes(` ${uf} `) || qUp.includes(` ${uf}?`) || qUp.endsWith(` ${uf}`)) {
-      const sql = `
-        SELECT COUNT(*) AS total
-        FROM chat_rfb.main.empresas
-        WHERE uf = ?
-      `;
-      const rows = await queryAll(sql, [uf]);
+    if (qUp.includes(` ${uf}`) || qUp.endsWith(uf)) {
+      const sql = `SELECT COUNT(*) AS total FROM chat_rfb.main.empresas WHERE uf = '${uf}'`;
+      const rows = await queryAll(sql);
       return { sql, rows, mode: "count" };
     }
   }
 
-  // 5) Busca por CNPJ
+  // CNPJ
   const digits = q.replace(/\D/g, "");
   if (digits.length >= 8) {
     const cnpj = digits.slice(0, 8);
-    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 10`;
-    const rows = await queryAll(sql, [cnpj]);
+    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = '${cnpj}' LIMIT 10`;
+    const rows = await queryAll(sql);
     return { sql, rows, mode: "list" };
   }
 
-  // 6) Busca por nome
-  const sql = `
-    SELECT * FROM chat_rfb.main.empresas 
-    WHERE razao_social LIKE ? OR nome_fantasia LIKE ?
-    LIMIT 10
-  `;
-  const rows = await queryAll(sql, [`%${qUp}%`, `%${qUp}%`]);
+  // Nome
+  const sql = `SELECT * FROM chat_rfb.main.empresas WHERE razao_social LIKE '%${qUp}%' OR nome_fantasia LIKE '%${qUp}%' LIMIT 10`;
+  const rows = await queryAll(sql);
   return { sql, rows, mode: "list" };
 }
 
@@ -284,8 +196,7 @@ app.get("/health", (_, res) => {
     ok: true,
     timestamp: new Date().toISOString(),
     motherduck: MD_TOKEN ? "configured" : "missing",
-    claude: ANTHROPIC_API_KEY ? "configured" : "missing",
-    cache_size: queryCache.size
+    claude: ANTHROPIC_API_KEY ? "configured" : "missing"
   });
 });
 
@@ -296,40 +207,30 @@ app.post("/chat", async (req, res) => {
   try {
     const q = String(req.body?.query || "").trim();
     if (!q) {
-      return res.json({ 
-        answer: "Por favor, digite uma consulta.", 
-        debug: { stage: "empty_query" } 
-      });
+      return res.json({ answer: "Digite uma consulta.", debug: { stage: "empty" } });
     }
 
-    let sql;
-    let rows;
-    let usedFallback = false;
+    let sql, rows, usedFallback = false;
 
-    // 1) Tenta Claude -> SQL
     try {
       debug.stage = "llm_to_sql";
       sql = await llmToSQL(q);
       debug.sql = sql;
 
-      // 2) Executa SQL (com cache)
       debug.stage = "run_sql";
       rows = await cachedQueryAll(sql);
 
-      // FALLBACK INTELIGENTE: Se retornou vazio em query de contagem
-      if (!rows?.length && (q.toLowerCase().includes("quant") || q.toLowerCase().includes("total"))) {
-        console.log("⚠️ SQL retornou vazio em query de contagem - tentando fallback");
+      if (!rows?.length && q.toLowerCase().includes("quant")) {
+        console.log("⚠️ Vazio, usando fallback");
         const fb = await fallbackQuery(q);
         sql = fb.sql;
         rows = fb.rows;
         usedFallback = true;
-        debug.fallback_reason = "empty_count_result";
       }
 
     } catch (e) {
-      // Claude falhou ou SQL inválida - usa fallback
-      debug.stage = "llm_failed_using_fallback";
-      debug.llm_error = String(e?.message || e);
+      debug.stage = "llm_failed";
+      debug.error = String(e?.message || e);
 
       const fb = await fallbackQuery(q);
       sql = fb.sql;
@@ -338,11 +239,10 @@ app.post("/chat", async (req, res) => {
 
       const duration = Date.now() - start;
 
-      // Resposta para COUNT
       if (fb.mode === "count") {
         const total = Number(fb.rows?.[0]?.total || 0);
         return res.json({
-          answer: `Total encontrado: ${total.toLocaleString('pt-BR')} empresa(s)`,
+          answer: `Total: ${total.toLocaleString('pt-BR')} empresa(s)`,
           sql: fb.sql,
           rows: fb.rows,
           duration_ms: duration,
@@ -351,10 +251,9 @@ app.post("/chat", async (req, res) => {
         });
       }
 
-      // Resposta para LISTA vazia
       if (!fb.rows?.length) {
         return res.json({
-          answer: "Nenhuma empresa encontrada com esses critérios.",
+          answer: "Nenhuma empresa encontrada.",
           sql: fb.sql,
           rows: [],
           duration_ms: duration,
@@ -363,10 +262,9 @@ app.post("/chat", async (req, res) => {
         });
       }
 
-      // Resposta para LISTA com resultados
       const first = fb.rows[0];
       return res.json({
-        answer: `Encontrei ${fb.rows.length} empresa(s). Primeira: ${first.razao_social || first.nome_fantasia} (CNPJ: ${first.cnpj_basico})`,
+        answer: `Encontrei ${fb.rows.length} empresa(s). Primeira: ${first.razao_social || first.nome_fantasia}`,
         sql: fb.sql,
         rows: fb.rows,
         duration_ms: duration,
@@ -375,7 +273,6 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // 3) Claude explica o resultado
     debug.stage = "llm_explain";
     let answer = null;
     
@@ -389,16 +286,13 @@ app.post("/chat", async (req, res) => {
 
     const duration = Date.now() - start;
 
-    // Fallback para resposta se Claude não explicou
     if (!answer) {
       if (!rows?.length) {
         answer = "Nenhuma empresa encontrada.";
       } else if (rows.length === 1 && rows[0].total !== undefined) {
-        // É uma contagem
         const num = Number(rows[0].total).toLocaleString('pt-BR');
-        answer = `Total encontrado: ${num} empresa(s).`;
+        answer = `Total: ${num} empresa(s).`;
       } else {
-        // É uma lista
         answer = `Encontrei ${rows.length} empresa(s).`;
       }
     }
@@ -413,34 +307,19 @@ app.post("/chat", async (req, res) => {
     });
 
   } catch (e) {
-    debug.stage = debug.stage || "unknown_error";
     debug.error = String(e?.message || e);
-
     return res.status(500).json({
-      answer: "Erro interno no servidor. Tente novamente.",
+      answer: "Erro interno.",
       duration_ms: Date.now() - start,
       debug
     });
   }
 });
 
-/* ========================= KEEP-ALIVE DESATIVADO ========================= */
-// Comentado temporariamente devido a erro do DuckDB
-// setInterval(async () => {
-//   try {
-//     await queryAll("SELECT 1");
-//     console.log("💓 Heartbeat OK - " + new Date().toLocaleTimeString());
-//   } catch (e) {
-//     console.error("❌ Heartbeat failed:", e.message);
-//   }
-// }, 5 * 60 * 1000);
-
 /* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 BDC API rodando na porta :${PORT}`);
-  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅ Configurado" : "❌ Ausente"}`);
-  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? "✅ Configurado" : "❌ Ausente"}`);
-  console.log(`📦 Cache: Ativo (TTL: 10min)`);
-  console.log(`💓 Keep-alive: Ativo (5min)`);
+  console.log(`🚀 BDC API :${PORT}`);
+  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅" : "❌"}`);
+  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? "✅" : "❌"}`);
 });
