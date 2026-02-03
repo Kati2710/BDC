@@ -26,6 +26,7 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 
+// Preflight sempre OK
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -39,6 +40,7 @@ const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
 
 const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 
+// ✅ queryAll correto (params como array)
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
@@ -72,13 +74,13 @@ data_opcao_mei, data_exclusao_mei
 function sanitizeSQL(sql) {
   let s = String(sql || "").trim();
 
-  // remove ```...``` se vier
+  // remove ```...```
   s = s.replace(/```[\s\S]*?```/g, (m) => m.replace(/```sql|```/gi, "").trim());
 
   // remove ; final
   s = s.replace(/;+\s*$/g, "").trim();
 
-  // pega do primeiro SELECT em diante
+  // pega do primeiro SELECT
   const idx = s.toLowerCase().indexOf("select");
   if (idx === -1) throw new Error("SQL inválida: não encontrei SELECT.");
   s = s.slice(idx).trim();
@@ -87,10 +89,10 @@ function sanitizeSQL(sql) {
   const blocked = /\b(insert|update|delete|drop|alter|create|truncate|copy|attach|detach|pragma|call)\b/i;
   if (blocked.test(s)) throw new Error("SQL bloqueada: comando não permitido.");
 
-  // bloqueia múltiplas statements
+  // bloqueia múltiplas instruções
   if (s.includes(";")) throw new Error("SQL bloqueada: múltiplas instruções.");
 
-  // LIMIT automático se não for agregação
+  // LIMIT automático para listas (não agrega)
   const isAggregate =
     /\bcount\s*\(|\bgroup\s+by\b|\bsum\s*\(|\bavg\s*\(|\bmin\s*\(|\bmax\s*\(/i.test(s);
 
@@ -150,19 +152,33 @@ async function llmExplain(userQuery, sql, rows) {
   return resp?.content?.[0]?.text || null;
 }
 
-/* ========================= FALLBACK (se Claude falhar) ========================= */
+/* ========================= FALLBACK (SEM CLAUDE) ========================= */
 async function fallbackQuery(userQuery) {
-  const digits = userQuery.replace(/\D/g, "");
+  const q = String(userQuery || "").trim();
+  const qUp = q.toUpperCase();
+
+  // ✅ contagem simples (ex.: "quantas empresas ativas existem no Brasil")
+  if (qUp.includes("QUANT") && qUp.includes("ATIV")) {
+    const sql = `
+      SELECT COUNT(*) AS total
+      FROM chat_rfb.main.empresas
+      WHERE situacao_cadastral = 'ATIVA'
+    `;
+    const rows = await queryAll(sql);
+    return { sql, rows, mode: "count" };
+  }
+
+  // fallback antigo (CNPJ ou nome)
+  const digits = q.replace(/\D/g, "");
   if (digits.length >= 8) {
     const cnpj = digits.slice(0, 8);
     const sql = `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 5`;
     const rows = await queryAll(sql, [cnpj]);
-    return { sql, rows };
+    return { sql, rows, mode: "list" };
   } else {
-    const term = userQuery.toUpperCase();
     const sql = `SELECT * FROM chat_rfb.main.empresas WHERE upper(razao_social) LIKE ? LIMIT 5`;
-    const rows = await queryAll(sql, [`%${term}%`]);
-    return { sql, rows };
+    const rows = await queryAll(sql, [`%${qUp}%`]);
+    return { sql, rows, mode: "list" };
   }
 }
 
@@ -200,9 +216,22 @@ app.post("/chat", async (req, res) => {
       const fb = await fallbackQuery(q);
       const duration = Date.now() - start;
 
+      // ✅ modo COUNT
+      if (fb.mode === "count") {
+        const total = Number(fb.rows?.[0]?.total || 0);
+        return res.json({
+          answer: `Claude indisponível agora (${debug.error}).\nTotal de empresas ATIVAS no Brasil: ${total}.`,
+          sql: fb.sql,
+          rows: fb.rows,
+          duration_ms: duration,
+          debug
+        });
+      }
+
+      // ✅ modo LISTA
       if (!fb.rows?.length) {
         return res.json({
-          answer: "Nenhum resultado encontrado.",
+          answer: `Claude indisponível agora (${debug.error}).\nNenhum resultado encontrado no fallback.`,
           sql: fb.sql,
           rows: [],
           duration_ms: duration,
@@ -211,7 +240,10 @@ app.post("/chat", async (req, res) => {
       }
 
       return res.json({
-        answer: `Claude indisponível agora. Mostrando resultados diretos.\nPrimeiro: ${fb.rows[0].razao_social} (CNPJ: ${fb.rows[0].cnpj_basico})`,
+        answer:
+          `Claude indisponível agora (${debug.error}).\n` +
+          `Mostrando resultados diretos.\n` +
+          `Primeiro: ${fb.rows[0].razao_social} (CNPJ: ${fb.rows[0].cnpj_basico})`,
         sql: fb.sql,
         rows: fb.rows,
         duration_ms: duration,
@@ -223,7 +255,7 @@ app.post("/chat", async (req, res) => {
     debug.stage = "run_sql";
     const rows = await queryAll(sql);
 
-    // 3) Claude explica (se der erro aqui, também não quebra)
+    // 3) Claude explica (se falhar, não quebra)
     debug.stage = "llm_explain";
     let answer = null;
     try {
@@ -235,7 +267,6 @@ app.post("/chat", async (req, res) => {
 
     const duration = Date.now() - start;
 
-    // fallback de resposta se explain falhar
     if (!answer) {
       if (!rows?.length) answer = "Nenhum resultado encontrado.";
       else answer = `Resultado obtido (${rows.length} linha(s)).`;
@@ -250,7 +281,6 @@ app.post("/chat", async (req, res) => {
     });
 
   } catch (e) {
-    // Mesmo erro geral: devolve debug e mensagem
     debug.stage = debug.stage || "unknown";
     debug.error = String(e?.message || e);
 
