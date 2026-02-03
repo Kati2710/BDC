@@ -82,12 +82,13 @@ Tabela: chat_rfb.main.empresas (empresas brasileiras da Receita Federal)
 Colunas principais:
 - cnpj_basico: 8 primeiros dígitos do CNPJ (ex: "33000167")
 - razao_social: nome oficial da empresa em MAIÚSCULAS (ex: "PETROBRAS S.A.")
-- situacao_cadastral: situação atual - VALORES POSSÍVEIS: "ATIVA", "SUSPENSA", "BAIXADA", "NULA", "INAPTA"
+- situacao_cadastral: situação atual - VALORES: "ATIVA", "SUSPENSA", "BAIXADA", "NULA", "INAPTA"
 - uf: sigla do estado (ex: "SP", "RJ", "MG", "RS")
 - municipio: nome da cidade em MAIÚSCULAS (ex: "SAO PAULO", "RIO DE JANEIRO")
 - cnae_fiscal: código CNAE principal da atividade
 - cnae_descricao: descrição da atividade econômica
 - porte: tamanho da empresa - VALORES: "ME", "EPP", "DEMAIS"
+- opcao_mei: se é MEI - VALORES: "S" (sim) ou "N" (não)
 - natureza_juridica: tipo societário (ex: "SOCIEDADE ANONIMA FECHADA", "SOCIEDADE LIMITADA")
 - capital_social: capital social em reais
 - nome_fantasia: nome fantasia (pode ser NULL)
@@ -97,9 +98,10 @@ Colunas principais:
 REGRAS CRÍTICAS:
 1. NÃO existe coluna 'pais' ou 'país' - TODAS as empresas já são do Brasil
 2. Para empresas ativas use: WHERE situacao_cadastral = 'ATIVA'
-3. Nomes estão em MAIÚSCULAS sem acentos (use UPPER() para comparar)
-4. Para buscar nome: WHERE razao_social LIKE '%TERMO%' ou WHERE nome_fantasia LIKE '%TERMO%'
-5. NUNCA invente colunas que não existem no schema acima
+3. Para MEI use: WHERE opcao_mei = 'S'
+4. Nomes estão em MAIÚSCULAS sem acentos (use UPPER() para comparar)
+5. Para buscar nome: WHERE razao_social LIKE '%TERMO%' ou WHERE nome_fantasia LIKE '%TERMO%'
+6. NUNCA invente colunas que não existem no schema acima
 `;
 
 function sanitizeSQL(sql) {
@@ -188,7 +190,18 @@ async function fallbackQuery(userQuery) {
   const q = String(userQuery || "").trim();
   const qUp = q.toUpperCase();
 
-  // Contagem de empresas ativas
+  // 1) MEI
+  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("MEI")) {
+    const sql = `
+      SELECT COUNT(*) AS total
+      FROM chat_rfb.main.empresas
+      WHERE opcao_mei = 'S'
+    `;
+    const rows = await cachedQueryAll(sql);
+    return { sql, rows, mode: "count" };
+  }
+
+  // 2) Empresas ativas
   if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("ATIV")) {
     const sql = `
       SELECT COUNT(*) AS total
@@ -199,7 +212,42 @@ async function fallbackQuery(userQuery) {
     return { sql, rows, mode: "count" };
   }
 
-  // Busca por CNPJ
+  // 3) Por porte (ME, EPP)
+  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && (qUp.includes("MICROEMPRESA") || qUp.includes(" ME "))) {
+    const sql = `
+      SELECT COUNT(*) AS total
+      FROM chat_rfb.main.empresas
+      WHERE porte = 'ME'
+    `;
+    const rows = await cachedQueryAll(sql);
+    return { sql, rows, mode: "count" };
+  }
+
+  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("EPP")) {
+    const sql = `
+      SELECT COUNT(*) AS total
+      FROM chat_rfb.main.empresas
+      WHERE porte = 'EPP'
+    `;
+    const rows = await cachedQueryAll(sql);
+    return { sql, rows, mode: "count" };
+  }
+
+  // 4) Por UF
+  const ufs = ["SP", "RJ", "MG", "RS", "PR", "SC", "BA", "PE", "CE", "DF", "GO", "ES", "PA", "AM", "MA", "PB", "RN", "AL", "SE", "PI", "MT", "MS", "AC", "RO", "RR", "AP", "TO"];
+  for (const uf of ufs) {
+    if (qUp.includes(` ${uf} `) || qUp.includes(` ${uf}?`) || qUp.endsWith(` ${uf}`)) {
+      const sql = `
+        SELECT COUNT(*) AS total
+        FROM chat_rfb.main.empresas
+        WHERE uf = ?
+      `;
+      const rows = await queryAll(sql, [uf]);
+      return { sql, rows, mode: "count" };
+    }
+  }
+
+  // 5) Busca por CNPJ
   const digits = q.replace(/\D/g, "");
   if (digits.length >= 8) {
     const cnpj = digits.slice(0, 8);
@@ -208,7 +256,7 @@ async function fallbackQuery(userQuery) {
     return { sql, rows, mode: "list" };
   }
 
-  // Busca por nome (razão social ou fantasia)
+  // 6) Busca por nome
   const sql = `
     SELECT * FROM chat_rfb.main.empresas 
     WHERE razao_social LIKE ? OR nome_fantasia LIKE ?
@@ -282,7 +330,7 @@ app.post("/chat", async (req, res) => {
       if (fb.mode === "count") {
         const total = Number(fb.rows?.[0]?.total || 0);
         return res.json({
-          answer: `Total de empresas ATIVAS no Brasil: ${total.toLocaleString('pt-BR')}`,
+          answer: `Total encontrado: ${total.toLocaleString('pt-BR')} empresa(s)`,
           sql: fb.sql,
           rows: fb.rows,
           duration_ms: duration,
@@ -365,7 +413,6 @@ app.post("/chat", async (req, res) => {
 });
 
 /* ========================= KEEP-ALIVE ========================= */
-// Previne cold start do Render e MotherDuck
 setInterval(async () => {
   try {
     await queryAll("SELECT 1 AS ping");
@@ -373,7 +420,7 @@ setInterval(async () => {
   } catch (e) {
     console.error("❌ Heartbeat failed:", e.message);
   }
-}, 5 * 60 * 1000); // A cada 5 minutos
+}, 5 * 60 * 1000);
 
 /* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
