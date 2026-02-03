@@ -216,9 +216,11 @@ app.post("/chat", async (req, res) => {
       debug.stage = "llm_to_sql";
       sql = await llmToSQL(q);
       debug.sql = sql;
+      console.log("✅ Claude gerou SQL:", sql);
 
       debug.stage = "run_sql";
       rows = await cachedQueryAll(sql);
+      console.log(`📊 SQL retornou ${rows?.length || 0} linhas`);
 
       if (!rows?.length && q.toLowerCase().includes("quant")) {
         console.log("⚠️ Vazio, usando fallback");
@@ -231,6 +233,7 @@ app.post("/chat", async (req, res) => {
     } catch (e) {
       debug.stage = "llm_failed";
       debug.error = String(e?.message || e);
+      console.log("❌ Claude falhou:", e?.message || e);
 
       const fb = await fallbackQuery(q);
       sql = fb.sql;
