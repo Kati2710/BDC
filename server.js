@@ -26,7 +26,6 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 
-// Preflight sempre OK
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -40,7 +39,6 @@ const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
 
 const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 
-// ✅ queryAll correto (params como array)
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
@@ -52,50 +50,81 @@ function queryAll(sql, params = []) {
   });
 }
 
+/* ========================= CACHE ========================= */
+const queryCache = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutos
+
+async function cachedQueryAll(sql, params = []) {
+  const cacheKey = JSON.stringify({ sql, params });
+  
+  if (queryCache.has(cacheKey)) {
+    const { data, timestamp } = queryCache.get(cacheKey);
+    if (Date.now() - timestamp < CACHE_TTL) {
+      console.log("📦 Cache HIT");
+      return data;
+    }
+    queryCache.delete(cacheKey);
+  }
+
+  const data = await queryAll(sql, params);
+  queryCache.set(cacheKey, { data, timestamp: Date.now() });
+  console.log("💾 Cache MISS - salvando");
+  return data;
+}
+
 /* ========================= CLAUDE ========================= */
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
 const SCHEMA_HINT = `
-Tabela única: chat_rfb.main.empresas
-Colunas:
-cnpj_basico, razao_social, natureza_juridica_codigo, natureza_juridica,
-qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social,
-porte_codigo, porte, ente_federativo, cnpj, matriz_filial_codigo, matriz_filial,
-nome_fantasia, situacao_cadastral_codigo, situacao_cadastral,
-data_situacao_cadastral, motivo_situacao_codigo, motivo_situacao,
-data_inicio_atividade, cnae_fiscal, cnae_descricao, cnaes_secundarios,
-tipo_logradouro, logradouro, numero, complemento, bairro, cep, uf,
-municipio_codigo, municipio, ddd, telefone, email, situacao_especial,
-opcao_simples, data_opcao_simples, data_exclusao_simples, opcao_mei,
-data_opcao_mei, data_exclusao_mei
+Tabela: chat_rfb.main.empresas (empresas brasileiras da Receita Federal)
+
+Colunas principais:
+- cnpj_basico: 8 primeiros dígitos do CNPJ (ex: "33000167")
+- razao_social: nome oficial da empresa em MAIÚSCULAS (ex: "PETROBRAS S.A.")
+- situacao_cadastral: situação atual - VALORES POSSÍVEIS: "ATIVA", "SUSPENSA", "BAIXADA", "NULA", "INAPTA"
+- uf: sigla do estado (ex: "SP", "RJ", "MG", "RS")
+- municipio: nome da cidade em MAIÚSCULAS (ex: "SAO PAULO", "RIO DE JANEIRO")
+- cnae_fiscal: código CNAE principal da atividade
+- cnae_descricao: descrição da atividade econômica
+- porte: tamanho da empresa - VALORES: "ME", "EPP", "DEMAIS"
+- natureza_juridica: tipo societário (ex: "SOCIEDADE ANONIMA FECHADA", "SOCIEDADE LIMITADA")
+- capital_social: capital social em reais
+- nome_fantasia: nome fantasia (pode ser NULL)
+- data_inicio_atividade: data de abertura
+- email: email de contato (pode ser NULL)
+
+REGRAS CRÍTICAS:
+1. NÃO existe coluna 'pais' ou 'país' - TODAS as empresas já são do Brasil
+2. Para empresas ativas use: WHERE situacao_cadastral = 'ATIVA'
+3. Nomes estão em MAIÚSCULAS sem acentos (use UPPER() para comparar)
+4. Para buscar nome: WHERE razao_social LIKE '%TERMO%' ou WHERE nome_fantasia LIKE '%TERMO%'
+5. NUNCA invente colunas que não existem no schema acima
 `;
 
 function sanitizeSQL(sql) {
   let s = String(sql || "").trim();
 
-  // remove ```...```
+  // Remove markdown
   s = s.replace(/```[\s\S]*?```/g, (m) => m.replace(/```sql|```/gi, "").trim());
-
-  // remove ; final
+  
+  // Remove ; final
   s = s.replace(/;+\s*$/g, "").trim();
 
-  // pega do primeiro SELECT
+  // Pega do primeiro SELECT
   const idx = s.toLowerCase().indexOf("select");
   if (idx === -1) throw new Error("SQL inválida: não encontrei SELECT.");
   s = s.slice(idx).trim();
 
-  // bloqueia comandos perigosos
+  // Bloqueia comandos perigosos
   const blocked = /\b(insert|update|delete|drop|alter|create|truncate|copy|attach|detach|pragma|call)\b/i;
   if (blocked.test(s)) throw new Error("SQL bloqueada: comando não permitido.");
 
-  // bloqueia múltiplas instruções
+  // Bloqueia múltiplas instruções
   if (s.includes(";")) throw new Error("SQL bloqueada: múltiplas instruções.");
 
-  // LIMIT automático para listas (não agrega)
-  const isAggregate =
-    /\bcount\s*\(|\bgroup\s+by\b|\bsum\s*\(|\bavg\s*\(|\bmin\s*\(|\bmax\s*\(/i.test(s);
-
+  // LIMIT automático para listas (não agregações)
+  const isAggregate = /\bcount\s*\(|\bgroup\s+by\b|\bsum\s*\(|\bavg\s*\(|\bmin\s*\(|\bmax\s*\(/i.test(s);
   if (!isAggregate && !/\blimit\b/i.test(s)) s += " LIMIT 50";
 
   return s;
@@ -106,21 +135,20 @@ async function llmToSQL(userQuery) {
 
   const resp = await anthropic.messages.create({
     model: "claude-3-5-sonnet-latest",
-    max_tokens: 260,
+    max_tokens: 300,
     temperature: 0,
     system:
-      "Converta perguntas em SQL DuckDB. " +
-      "Use APENAS a tabela chat_rfb.main.empresas e as colunas fornecidas. " +
-      "Gere UMA ÚNICA query SELECT. " +
-      "Não use ';'. " +
-      "Para listas, use LIMIT. " +
-      "Para contagem, use COUNT(*). " +
-      "Não invente tabelas/colunas.",
+      "Você é um especialista em SQL DuckDB para dados da Receita Federal brasileira. " +
+      "Gere queries PRECISAS e OTIMIZADAS usando APENAS a tabela e colunas fornecidas. " +
+      "NUNCA invente colunas. NUNCA use colunas que não existem no schema. " +
+      "Para contagens use COUNT(*). Para listas use LIMIT. " +
+      "Responda APENAS a SQL, sem explicações, sem markdown.",
     messages: [{
       role: "user",
       content:
-        `${SCHEMA_HINT}\n\nPergunta: ${userQuery}\n\n` +
-        "Responda SOMENTE com a SQL (sem markdown, sem explicações)."
+        `${SCHEMA_HINT}\n\n` +
+        `Pergunta do usuário: "${userQuery}"\n\n` +
+        "Gere SOMENTE a SQL DuckDB (query única, sem markdown, sem explicação):"
     }]
   });
 
@@ -133,53 +161,61 @@ async function llmExplain(userQuery, sql, rows) {
 
   const resp = await anthropic.messages.create({
     model: "claude-3-5-sonnet-latest",
-    max_tokens: 240,
-    temperature: 0.6,
+    max_tokens: 280,
+    temperature: 0.7,
     system:
-      "Você é um assistente brasileiro, objetivo e amigável. " +
-      "Use APENAS os dados retornados. Não invente nada. " +
-      "Se vier vazio, diga que não encontrou.",
+      "Você é um assistente brasileiro experiente em dados empresariais. " +
+      "Seja objetivo, amigável e preciso. " +
+      "Use APENAS os dados fornecidos - não invente informações. " +
+      "Se o resultado for vazio, informe de forma clara. " +
+      "Para números grandes, use separadores de milhar.",
     messages: [{
       role: "user",
       content:
-        `Pergunta: ${userQuery}\n` +
+        `Pergunta do usuário: ${userQuery}\n` +
         `SQL executada: ${sql}\n` +
-        `Resultado (JSON): ${JSON.stringify(rows)}\n\n` +
-        "Explique em pt-BR de forma curta e útil."
+        `Resultado (primeiras linhas): ${JSON.stringify(rows.slice(0, 3))}\n` +
+        `Total de linhas: ${rows.length}\n\n` +
+        "Explique o resultado em português brasileiro de forma útil e concisa."
     }]
   });
 
   return resp?.content?.[0]?.text || null;
 }
 
-/* ========================= FALLBACK (SEM CLAUDE) ========================= */
+/* ========================= FALLBACK ========================= */
 async function fallbackQuery(userQuery) {
   const q = String(userQuery || "").trim();
   const qUp = q.toUpperCase();
 
-  // ✅ contagem simples (ex.: "quantas empresas ativas existem no Brasil")
-  if (qUp.includes("QUANT") && qUp.includes("ATIV")) {
+  // Contagem de empresas ativas
+  if ((qUp.includes("QUANT") || qUp.includes("TOTAL")) && qUp.includes("ATIV")) {
     const sql = `
       SELECT COUNT(*) AS total
       FROM chat_rfb.main.empresas
       WHERE situacao_cadastral = 'ATIVA'
     `;
-    const rows = await queryAll(sql);
+    const rows = await cachedQueryAll(sql);
     return { sql, rows, mode: "count" };
   }
 
-  // fallback antigo (CNPJ ou nome)
+  // Busca por CNPJ
   const digits = q.replace(/\D/g, "");
   if (digits.length >= 8) {
     const cnpj = digits.slice(0, 8);
-    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 5`;
+    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 10`;
     const rows = await queryAll(sql, [cnpj]);
     return { sql, rows, mode: "list" };
-  } else {
-    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE upper(razao_social) LIKE ? LIMIT 5`;
-    const rows = await queryAll(sql, [`%${qUp}%`]);
-    return { sql, rows, mode: "list" };
   }
+
+  // Busca por nome (razão social ou fantasia)
+  const sql = `
+    SELECT * FROM chat_rfb.main.empresas 
+    WHERE razao_social LIKE ? OR nome_fantasia LIKE ?
+    LIMIT 10
+  `;
+  const rows = await queryAll(sql, [`%${qUp}%`, `%${qUp}%`]);
+  return { sql, rows, mode: "list" };
 }
 
 /* ========================= ROTAS ========================= */
@@ -188,7 +224,8 @@ app.get("/health", (_, res) => {
     ok: true,
     timestamp: new Date().toISOString(),
     motherduck: MD_TOKEN ? "configured" : "missing",
-    claude: ANTHROPIC_API_KEY ? "configured" : "missing"
+    claude: ANTHROPIC_API_KEY ? "configured" : "missing",
+    cache_size: queryCache.size
   });
 });
 
@@ -199,77 +236,111 @@ app.post("/chat", async (req, res) => {
   try {
     const q = String(req.body?.query || "").trim();
     if (!q) {
-      return res.json({ answer: "Consulta vazia.", debug: { stage: "empty_query" } });
+      return res.json({ 
+        answer: "Por favor, digite uma consulta.", 
+        debug: { stage: "empty_query" } 
+      });
     }
 
-    // 1) tenta Claude -> SQL
     let sql;
+    let rows;
+    let usedFallback = false;
+
+    // 1) Tenta Claude -> SQL
     try {
       debug.stage = "llm_to_sql";
       sql = await llmToSQL(q);
       debug.sql = sql;
+
+      // 2) Executa SQL (com cache)
+      debug.stage = "run_sql";
+      rows = await cachedQueryAll(sql);
+
+      // FALLBACK INTELIGENTE: Se retornou vazio em query de contagem
+      if (!rows?.length && (q.toLowerCase().includes("quant") || q.toLowerCase().includes("total"))) {
+        console.log("⚠️ SQL retornou vazio em query de contagem - tentando fallback");
+        const fb = await fallbackQuery(q);
+        sql = fb.sql;
+        rows = fb.rows;
+        usedFallback = true;
+        debug.fallback_reason = "empty_count_result";
+      }
+
     } catch (e) {
-      // Claude falhou: NÃO quebra, cai no fallback
-      debug.stage = "llm_failed_fallback";
-      debug.error = String(e?.message || e);
+      // Claude falhou ou SQL inválida - usa fallback
+      debug.stage = "llm_failed_using_fallback";
+      debug.llm_error = String(e?.message || e);
 
       const fb = await fallbackQuery(q);
+      sql = fb.sql;
+      rows = fb.rows;
+      usedFallback = true;
+
       const duration = Date.now() - start;
 
-      // ✅ modo COUNT
+      // Resposta para COUNT
       if (fb.mode === "count") {
         const total = Number(fb.rows?.[0]?.total || 0);
         return res.json({
-          answer: `Claude indisponível agora (${debug.error}).\nTotal de empresas ATIVAS no Brasil: ${total}.`,
+          answer: `Total de empresas ATIVAS no Brasil: ${total.toLocaleString('pt-BR')}`,
           sql: fb.sql,
           rows: fb.rows,
           duration_ms: duration,
+          used_fallback: true,
           debug
         });
       }
 
-      // ✅ modo LISTA
+      // Resposta para LISTA vazia
       if (!fb.rows?.length) {
         return res.json({
-          answer: `Claude indisponível agora (${debug.error}).\nNenhum resultado encontrado no fallback.`,
+          answer: "Nenhuma empresa encontrada com esses critérios.",
           sql: fb.sql,
           rows: [],
           duration_ms: duration,
+          used_fallback: true,
           debug
         });
       }
 
+      // Resposta para LISTA com resultados
+      const first = fb.rows[0];
       return res.json({
-        answer:
-          `Claude indisponível agora (${debug.error}).\n` +
-          `Mostrando resultados diretos.\n` +
-          `Primeiro: ${fb.rows[0].razao_social} (CNPJ: ${fb.rows[0].cnpj_basico})`,
+        answer: `Encontrei ${fb.rows.length} empresa(s). Primeira: ${first.razao_social || first.nome_fantasia} (CNPJ: ${first.cnpj_basico})`,
         sql: fb.sql,
         rows: fb.rows,
         duration_ms: duration,
+        used_fallback: true,
         debug
       });
     }
 
-    // 2) executa SQL no MotherDuck
-    debug.stage = "run_sql";
-    const rows = await queryAll(sql);
-
-    // 3) Claude explica (se falhar, não quebra)
+    // 3) Claude explica o resultado
     debug.stage = "llm_explain";
     let answer = null;
+    
     try {
-      answer = await llmExplain(q, sql, rows);
+      if (rows?.length) {
+        answer = await llmExplain(q, sql, rows);
+      }
     } catch (e) {
-      debug.stage = "llm_explain_failed";
-      debug.error = String(e?.message || e);
+      debug.explain_error = String(e?.message || e);
     }
 
     const duration = Date.now() - start;
 
+    // Fallback para resposta se Claude não explicou
     if (!answer) {
-      if (!rows?.length) answer = "Nenhum resultado encontrado.";
-      else answer = `Resultado obtido (${rows.length} linha(s)).`;
+      if (!rows?.length) {
+        answer = "Nenhuma empresa encontrada.";
+      } else if (rows.length === 1 && rows[0].total !== undefined) {
+        // É uma contagem
+        const num = Number(rows[0].total).toLocaleString('pt-BR');
+        answer = `Total encontrado: ${num} empresa(s).`;
+      } else {
+        // É uma lista
+        answer = `Encontrei ${rows.length} empresa(s).`;
+      }
     }
 
     return res.json({
@@ -277,25 +348,39 @@ app.post("/chat", async (req, res) => {
       sql,
       rows,
       duration_ms: duration,
+      used_fallback: usedFallback,
       debug
     });
 
   } catch (e) {
-    debug.stage = debug.stage || "unknown";
+    debug.stage = debug.stage || "unknown_error";
     debug.error = String(e?.message || e);
 
     return res.status(500).json({
-      answer: "Erro interno.",
+      answer: "Erro interno no servidor. Tente novamente.",
       duration_ms: Date.now() - start,
       debug
     });
   }
 });
 
+/* ========================= KEEP-ALIVE ========================= */
+// Previne cold start do Render e MotherDuck
+setInterval(async () => {
+  try {
+    await queryAll("SELECT 1 AS ping");
+    console.log("💓 Heartbeat OK - " + new Date().toLocaleTimeString());
+  } catch (e) {
+    console.error("❌ Heartbeat failed:", e.message);
+  }
+}, 5 * 60 * 1000); // A cada 5 minutos
+
 /* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 BDC API on :${PORT}`);
-  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅" : "❌"}`);
-  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? "✅" : "❌"}`);
+  console.log(`🚀 BDC API rodando na porta :${PORT}`);
+  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅ Configurado" : "❌ Ausente"}`);
+  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? "✅ Configurado" : "❌ Ausente"}`);
+  console.log(`📦 Cache: Ativo (TTL: 10min)`);
+  console.log(`💓 Keep-alive: Ativo (5min)`);
 });
