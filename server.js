@@ -156,6 +156,7 @@ REGRAS CRÍTICAS:
 5. Nomes em MAIÚSCULAS sem acentos
 6. NUNCA use colunas que não existem nesta lista
 7. Para filtrar por SETOR (tecnologia, restaurante, etc), use códigos CNAE, NÃO palavras na descrição
+8. NÃO USE COMENTÁRIOS (-- ou /* */) dentro da SQL
 
 EXEMPLOS DE QUERIES:
 - "Empresas de tecnologia ativas": WHERE cnae_fiscal IN ('6201-5','6202-3','6203-1','6204-0','6209-1') AND situacao_cadastral='ATIVA'
@@ -164,7 +165,15 @@ EXEMPLOS DE QUERIES:
 
 function sanitizeSQL(sql) {
   let s = String(sql || "").trim();
+  
+  // Remove markdown code blocks
   s = s.replace(/```[\s\S]*?```/g, (m) => m.replace(/```sql|```/gi, "").trim());
+  
+  // Remove comentários SQL (-- e /* */)
+  s = s.replace(/--.*$/gm, ""); // Remove comentários de linha
+  s = s.replace(/\/\*[\s\S]*?\*\//g, ""); // Remove comentários de bloco
+  
+  // Remove ponto-e-vírgula final
   s = s.replace(/;+\s*$/g, "").trim();
 
   const idx = s.toLowerCase().indexOf("select");
