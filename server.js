@@ -99,8 +99,8 @@ DADOS CADASTRAIS:
 - situacao_especial: situação especial (pode ser NULL)
 
 CLASSIFICAÇÃO:
-- porte: "ME", "EPP", "DEMAIS"
-- porte_codigo: 1, 3, 5
+- porte: "MICRO EMPRESA", "EMPRESA DE PEQUENO PORTE", "DEMAIS"
+- porte_codigo: "01", "03", "05"
 - natureza_juridica: tipo societário (ex: "SOCIEDADE ANONIMA FECHADA")
 - natureza_juridica_codigo: código numérico
 - qualificacao_responsavel: qualificação do responsável
@@ -120,17 +120,24 @@ ATIVIDADE ECONÔMICA:
 - cnae_descricao: descrição da atividade principal
 - cnaes_secundarios: lista de CNAEs secundários
 
-CNAEs DE TECNOLOGIA (use estes códigos):
-- 6201-5: Desenvolvimento de programas de computador sob encomenda
-- 6202-3: Desenvolvimento e licenciamento de programas customizáveis
-- 6203-1: Desenvolvimento e licenciamento de programas não customizáveis
-- 6204-0: Consultoria em tecnologia da informação
-- 6209-1: Suporte técnico, manutenção e outros serviços em TI
-- 6311-9: Tratamento de dados, provedores de hospedagem
-- 6319-4: Portais, provedores de conteúdo e outros serviços de informação
+CNAEs DE TECNOLOGIA (use estes códigos SEM HÍFEN - 7 dígitos):
+- 6201501: Desenvolvimento de programas de computador sob encomenda
+- 6201502: Web design
+- 6202300: Desenvolvimento e licenciamento de programas customizáveis
+- 6203100: Desenvolvimento e licenciamento de programas não customizáveis
+- 6204000: Consultoria em tecnologia da informação
+- 6209100: Suporte técnico, manutenção e outros serviços em TI
+- 6311900: Tratamento de dados, provedores de hospedagem
+- 6319400: Portais, provedores de conteúdo e outros serviços de informação
+- 6201500: Desenvolvimento de software (genérico)
+- 4751201: Comércio varejista especializado de equipamentos de informática
+- 4751202: Comércio varejista especializado de software
 
 Para filtrar empresas de tecnologia use:
-WHERE cnae_fiscal IN ('6201-5', '6202-3', '6203-1', '6204-0', '6209-1', '6311-9', '6319-4')
+WHERE cnae_fiscal IN ('6201501', '6201502', '6201500', '6202300', '6203100', '6204000', '6209100', '6311900', '6319400')
+
+Para comércio de TI adicione também:
+WHERE cnae_fiscal IN ('4751201', '4751202')
 
 LOCALIZAÇÃO:
 - uf: sigla do estado (ex: "SP", "RJ", "MG")
@@ -153,14 +160,17 @@ REGRAS CRÍTICAS:
 2. Para empresas ativas: WHERE situacao_cadastral = 'ATIVA'
 3. Para MEI: WHERE opcao_mei = 'S'
 4. Para Simples Nacional: WHERE opcao_simples = 'S'
-5. Nomes em MAIÚSCULAS sem acentos
-6. NUNCA use colunas que não existem nesta lista
-7. Para filtrar por SETOR (tecnologia, restaurante, etc), use códigos CNAE, NÃO palavras na descrição
-8. NÃO USE COMENTÁRIOS (-- ou /* */) dentro da SQL
+5. Para microempresas: WHERE porte = 'MICRO EMPRESA'
+6. Para pequeno porte: WHERE porte = 'EMPRESA DE PEQUENO PORTE'
+7. Nomes em MAIÚSCULAS sem acentos
+8. NUNCA use colunas que não existem nesta lista
+9. Para filtrar por SETOR (tecnologia, restaurante, etc), use códigos CNAE SEM HÍFEN, NÃO palavras na descrição
+10. NÃO USE COMENTÁRIOS (-- ou /* */) dentro da SQL
 
 EXEMPLOS DE QUERIES:
-- "Empresas de tecnologia ativas": WHERE cnae_fiscal IN ('6201-5','6202-3','6203-1','6204-0','6209-1') AND situacao_cadastral='ATIVA'
+- "Empresas de tecnologia ativas": WHERE cnae_fiscal IN ('6201501','6201502','6201500','6202300','6203100','6204000','6209100','6311900','6319400') AND situacao_cadastral='ATIVA'
 - "Quantas empresas ativas": SELECT COUNT(DISTINCT cnpj_basico) WHERE situacao_cadastral='ATIVA'
+- "Microempresas em SP": WHERE porte = 'MICRO EMPRESA' AND uf = 'SP'
 `;
 
 function sanitizeSQL(sql) {
