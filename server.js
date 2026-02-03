@@ -116,9 +116,21 @@ REGIME TRIBUTÁRIO:
 - data_exclusao_simples: data de exclusão do Simples
 
 ATIVIDADE ECONÔMICA:
-- cnae_fiscal: código CNAE principal
+- cnae_fiscal: código CNAE principal (ex: "6201-5")
 - cnae_descricao: descrição da atividade principal
 - cnaes_secundarios: lista de CNAEs secundários
+
+CNAEs DE TECNOLOGIA (use estes códigos):
+- 6201-5: Desenvolvimento de programas de computador sob encomenda
+- 6202-3: Desenvolvimento e licenciamento de programas customizáveis
+- 6203-1: Desenvolvimento e licenciamento de programas não customizáveis
+- 6204-0: Consultoria em tecnologia da informação
+- 6209-1: Suporte técnico, manutenção e outros serviços em TI
+- 6311-9: Tratamento de dados, provedores de hospedagem
+- 6319-4: Portais, provedores de conteúdo e outros serviços de informação
+
+Para filtrar empresas de tecnologia use:
+WHERE cnae_fiscal IN ('6201-5', '6202-3', '6203-1', '6204-0', '6209-1', '6311-9', '6319-4')
 
 LOCALIZAÇÃO:
 - uf: sigla do estado (ex: "SP", "RJ", "MG")
@@ -143,6 +155,11 @@ REGRAS CRÍTICAS:
 4. Para Simples Nacional: WHERE opcao_simples = 'S'
 5. Nomes em MAIÚSCULAS sem acentos
 6. NUNCA use colunas que não existem nesta lista
+7. Para filtrar por SETOR (tecnologia, restaurante, etc), use códigos CNAE, NÃO palavras na descrição
+
+EXEMPLOS DE QUERIES:
+- "Empresas de tecnologia ativas": WHERE cnae_fiscal IN ('6201-5','6202-3','6203-1','6204-0','6209-1') AND situacao_cadastral='ATIVA'
+- "Quantas empresas ativas": SELECT COUNT(DISTINCT cnpj_basico) WHERE situacao_cadastral='ATIVA'
 `;
 
 function sanitizeSQL(sql) {
