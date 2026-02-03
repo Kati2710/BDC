@@ -74,23 +74,75 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
 const SCHEMA_HINT = `
-Tabela: chat_rfb.main.empresas (empresas brasileiras da Receita Federal)
+Tabela: chat_rfb.main.empresas (ESTABELECIMENTOS brasileiros da Receita Federal)
 
-Colunas principais:
-- cnpj_basico: 8 primeiros dígitos do CNPJ (ex: "33000167")
-- razao_social: nome oficial da empresa em MAIÚSCULAS (ex: "PETROBRAS S.A.")
-- situacao_cadastral: situação atual - VALORES: "ATIVA", "SUSPENSA", "BAIXADA", "NULA", "INAPTA"
-- uf: sigla do estado (ex: "SP", "RJ", "MG", "RS")
-- municipio: nome da cidade em MAIÚSCULAS (ex: "SAO PAULO", "RIO DE JANEIRO")
-- porte: tamanho da empresa - VALORES: "ME", "EPP", "DEMAIS"
-- opcao_mei: se é MEI - VALORES: "S" (sim) ou "N" (não)
-- natureza_juridica: tipo societário
+IMPORTANTE: Cada linha é um ESTABELECIMENTO (matriz ou filial), NÃO uma empresa!
+- Para contar EMPRESAS únicas: COUNT(DISTINCT cnpj_basico)
+- Para contar ESTABELECIMENTOS: COUNT(*)
 
-REGRAS:
-1. TODAS as empresas são do Brasil (não existe coluna 'pais')
+COLUNAS DISPONÍVEIS:
+
+IDENTIFICAÇÃO:
+- cnpj_basico: 8 dígitos que IDENTIFICAM A EMPRESA (ex: "33000167")
+- cnpj: CNPJ completo 14 dígitos - IDENTIFICA O ESTABELECIMENTO
+- matriz_filial_codigo: 1=MATRIZ, 2=FILIAL
+- matriz_filial: "MATRIZ" ou "FILIAL"
+
+DADOS CADASTRAIS:
+- razao_social: nome oficial em MAIÚSCULAS (ex: "PETROBRAS S.A.")
+- nome_fantasia: nome fantasia (pode ser NULL)
+- situacao_cadastral: "ATIVA", "SUSPENSA", "BAIXADA", "NULA", "INAPTA"
+- situacao_cadastral_codigo: código numérico da situação
+- data_situacao_cadastral: data da situação cadastral
+- motivo_situacao: motivo da situação cadastral
+- data_inicio_atividade: data de abertura
+- situacao_especial: situação especial (pode ser NULL)
+
+CLASSIFICAÇÃO:
+- porte: "ME", "EPP", "DEMAIS"
+- porte_codigo: 1, 3, 5
+- natureza_juridica: tipo societário (ex: "SOCIEDADE ANONIMA FECHADA")
+- natureza_juridica_codigo: código numérico
+- qualificacao_responsavel: qualificação do responsável
+- capital_social: capital social em reais
+- ente_federativo: ente federativo responsável
+
+REGIME TRIBUTÁRIO:
+- opcao_mei: "S" ou "N" (se é MEI)
+- data_opcao_mei: data de opção pelo MEI
+- data_exclusao_mei: data de exclusão do MEI
+- opcao_simples: "S" ou "N" (se é Simples Nacional)
+- data_opcao_simples: data de opção pelo Simples
+- data_exclusao_simples: data de exclusão do Simples
+
+ATIVIDADE ECONÔMICA:
+- cnae_fiscal: código CNAE principal
+- cnae_descricao: descrição da atividade principal
+- cnaes_secundarios: lista de CNAEs secundários
+
+LOCALIZAÇÃO:
+- uf: sigla do estado (ex: "SP", "RJ", "MG")
+- municipio: nome da cidade em MAIÚSCULAS (ex: "SAO PAULO")
+- municipio_codigo: código IBGE do município
+- cep: CEP do endereço
+- bairro: bairro
+- tipo_logradouro: tipo de logradouro (Rua, Av, etc)
+- logradouro: nome do logradouro
+- numero: número
+- complemento: complemento do endereço
+
+CONTATO:
+- ddd: DDD do telefone
+- telefone: número de telefone
+- email: email (pode ser NULL)
+
+REGRAS CRÍTICAS:
+1. EMPRESAS ≠ ESTABELECIMENTOS! Use COUNT(DISTINCT cnpj_basico) para empresas únicas
 2. Para empresas ativas: WHERE situacao_cadastral = 'ATIVA'
 3. Para MEI: WHERE opcao_mei = 'S'
-4. Nomes em MAIÚSCULAS sem acentos
+4. Para Simples Nacional: WHERE opcao_simples = 'S'
+5. Nomes em MAIÚSCULAS sem acentos
+6. NUNCA use colunas que não existem nesta lista
 `;
 
 function sanitizeSQL(sql) {
@@ -160,15 +212,29 @@ async function fallbackQuery(userQuery) {
   const q = String(userQuery || "").trim();
   const qUp = q.toUpperCase();
 
-  // MEI
+  // MEI - distingue EMPRESAS vs ESTABELECIMENTOS
   if (qUp.includes("MEI")) {
+    // Se pergunta por EMPRESAS
+    if (qUp.includes("EMPRES") && !qUp.includes("ESTABELEC")) {
+      const sql = "SELECT COUNT(DISTINCT cnpj_basico) AS total FROM chat_rfb.main.empresas WHERE opcao_mei = 'S'";
+      const rows = await cachedQueryAll(sql);
+      return { sql, rows, mode: "count" };
+    }
+    // Se pergunta por ESTABELECIMENTOS ou genérico
     const sql = "SELECT COUNT(*) AS total FROM chat_rfb.main.empresas WHERE opcao_mei = 'S'";
     const rows = await cachedQueryAll(sql);
     return { sql, rows, mode: "count" };
   }
 
-  // Ativas
+  // Ativas - distingue EMPRESAS vs ESTABELECIMENTOS
   if (qUp.includes("ATIV")) {
+    // Se pergunta por EMPRESAS (não estabelecimentos)
+    if (qUp.includes("EMPRES") && !qUp.includes("ESTABELEC")) {
+      const sql = "SELECT COUNT(DISTINCT cnpj_basico) AS total FROM chat_rfb.main.empresas WHERE situacao_cadastral = 'ATIVA'";
+      const rows = await cachedQueryAll(sql);
+      return { sql, rows, mode: "count" };
+    }
+    // Se pergunta por ESTABELECIMENTOS ou genérico
     const sql = "SELECT COUNT(*) AS total FROM chat_rfb.main.empresas WHERE situacao_cadastral = 'ATIVA'";
     const rows = await cachedQueryAll(sql);
     return { sql, rows, mode: "count" };
