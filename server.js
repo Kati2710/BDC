@@ -132,6 +132,15 @@ async function llmToSQL(userQuery) {
 async function llmExplain(userQuery, sql, rows) {
   if (!anthropic) return null;
 
+  // Converte BigInt pra Number
+  const rowsSerializable = rows.map(row => {
+    const newRow = {};
+    for (const [key, value] of Object.entries(row)) {
+      newRow[key] = typeof value === 'bigint' ? Number(value) : value;
+    }
+    return newRow;
+  });
+
   const resp = await anthropic.messages.create({
     model: "claude-sonnet-4-5-20250929",
     max_tokens: 280,
@@ -139,7 +148,7 @@ async function llmExplain(userQuery, sql, rows) {
     system: "Você é um assistente brasileiro. Seja objetivo e use separadores de milhar.",
     messages: [{
       role: "user",
-      content: `Pergunta: ${userQuery}\nSQL: ${sql}\nResultado: ${JSON.stringify(rows.slice(0, 3))}\n\nExplique em pt-BR:`
+      content: `Pergunta: ${userQuery}\nSQL: ${sql}\nResultado: ${JSON.stringify(rowsSerializable.slice(0, 3))}\n\nExplique em pt-BR:`
     }]
   });
 
