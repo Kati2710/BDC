@@ -42,11 +42,20 @@ const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
-    conn.all(sql, params, (err, rows) => {
-      conn.close();
-      if (err) return reject(err);
-      resolve(rows);
-    });
+    // Se params é vazio, não passa nada
+    if (!params || params.length === 0) {
+      conn.all(sql, (err, rows) => {
+        conn.close();
+        if (err) return reject(err);
+        resolve(rows);
+      });
+    } else {
+      conn.all(sql, params, (err, rows) => {
+        conn.close();
+        if (err) return reject(err);
+        resolve(rows);
+      });
+    }
   });
 }
 
@@ -415,7 +424,7 @@ app.post("/chat", async (req, res) => {
 /* ========================= KEEP-ALIVE ========================= */
 setInterval(async () => {
   try {
-    await queryAll("SELECT 1 AS ping");
+    await queryAll("SELECT COUNT(*) FROM chat_rfb.main.empresas LIMIT 1", []);
     console.log("💓 Heartbeat OK - " + new Date().toLocaleTimeString());
   } catch (e) {
     console.error("❌ Heartbeat failed:", e.message);
