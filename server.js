@@ -75,7 +75,10 @@ async function cachedQueryAll(sql, params = []) {
     queryCache.delete(cacheKey);
   }
 
-  const data = await queryAll(sql, params);
+  const data = (!params || params.length === 0) 
+    ? await queryAll(sql) 
+    : await queryAll(sql, params);
+    
   queryCache.set(cacheKey, { data, timestamp: Date.now() });
   console.log("💾 Cache MISS - salvando");
   return data;
@@ -424,7 +427,7 @@ app.post("/chat", async (req, res) => {
 /* ========================= KEEP-ALIVE ========================= */
 setInterval(async () => {
   try {
-    await queryAll("SELECT COUNT(*) FROM chat_rfb.main.empresas LIMIT 1", []);
+    await queryAll("SELECT COUNT(*) FROM chat_rfb.main.empresas LIMIT 1");
     console.log("💓 Heartbeat OK - " + new Date().toLocaleTimeString());
   } catch (e) {
     console.error("❌ Heartbeat failed:", e.message);
