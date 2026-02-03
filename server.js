@@ -12,33 +12,36 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:5500",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  "null" // file:// protocol
+  "null"
 ]);
 
 const corsOptions = {
   origin: (origin, cb) => {
-    console.log("🔍 Request from origin:", origin || "NO ORIGIN");
+    console.log("🔍 Origin:", origin || "NO ORIGIN");
 
-    // Permite requests sem Origin (curl, Postman, etc)
+    // requests sem Origin (curl/postman)
     if (!origin) return cb(null, true);
 
-    if (allowedOrigins.has(origin)) {
-      console.log("✅ Origin allowed:", origin);
-      return cb(null, true);
-    }
+    if (allowedOrigins.has(origin)) return cb(null, true);
 
-    console.log("❌ Origin blocked:", origin);
-    return cb(new Error(`CORS blocked for origin: ${origin}`));
+    // IMPORTANT: em vez de lançar erro, responde CORS negado de forma controlada
+    return cb(null, false);
   },
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"],
-  credentials: false,
+  allowedHeaders: ["Content-Type", "Accept"],
   optionsSuccessStatus: 204
 };
 
+// aplica CORS
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
-app.use(express.json({ limit: "256kb" }));
+
+// responde preflight SEM depender do app.options("*")
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
 
 /* ========================= MOTHERDUCK ========================= */
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN; // configure no Render
