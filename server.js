@@ -133,4 +133,89 @@ app.post("/chat", async (req, res) => {
     console.log("📨 POST /chat");
     console.log("📦 Body:", req.body);
 
-    const q = String(req
+    const q = String(req.body?.query || "").trim();
+    if (!q) {
+      return res.json({ answer: "Consulta vazia." });
+    }
+
+    const digits = q.replace(/\D/g, "");
+    let rows = [];
+
+    if (digits.length >= 8) {
+      const cnpj = digits.slice(0, 8);
+      console.log("🏢 Buscando por CNPJ:", cnpj);
+
+      rows = await queryAll(
+        `SELECT * FROM chat_rfb.main.empresas
+         WHERE cnpj_basico = ?
+         LIMIT 5`,
+        [cnpj]
+      );
+    } else {
+      const term = q.toUpperCase();
+      console.log("📝 Buscando por razão social:", term);
+
+      rows = await queryAll(
+        `SELECT * FROM chat_rfb.main.empresas
+         WHERE upper(razao_social) LIKE ?
+         LIMIT 5`,
+        [`%${term}%`]
+      );
+    }
+
+    const duration = Date.now() - startTime;
+
+    if (!rows?.length) {
+      return res.json({
+        answer: "Nenhum resultado encontrado.",
+        query: q,
+        duration_ms: duration
+      });
+    }
+
+    // fallback básico
+    const r = rows[0];
+    const basicAnswer =
+      `Encontrei ${rows.length} resultado(s).\n` +
+      `Primeiro: ${r.razao_social} (CNPJ: ${r.cnpj_basico})`;
+
+    // ✅ tenta humanizar com Claude (se configurado)
+    let answer = basicAnswer;
+    try {
+      const human = await humanizeAnswer({ query: q, rows });
+      if (human) answer = human;
+    } catch (e) {
+      console.error("⚠️ Claude error (fallback para básico):", e?.message || e);
+    }
+
+    return res.json({
+      answer,
+      rows,
+      query: q,
+      duration_ms: duration
+    });
+  } catch (e) {
+    console.error("❌ CHAT ERROR:", e);
+    return res.status(500).json({
+      answer: "Erro interno no chat.",
+      error: process.env.NODE_ENV === "development" ? e.message : undefined
+    });
+  }
+});
+
+// erro global
+app.use((err, req, res, next) => {
+  console.error("❌ Global error:", err);
+  res.status(500).json({
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "development" ? err.message : undefined
+  });
+});
+
+/* ========================= START ========================= */
+app.listen(PORT, () => {
+  console.log(`🚀 BDC API rodando na porta ${PORT}`);
+  console.log(`📍 Modo: ${process.env.NODE_ENV || "production"}`);
+  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅ configurado" : "❌ faltando"}`);
+  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? "✅ configurado" : "❌ faltando"}`);
+});
