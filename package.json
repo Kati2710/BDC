@@ -1,6 +1,17 @@
 {
+  "name": "bdc",
+  "private": true,
   "type": "module",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "duckdb": "^1.4.3",
+    "express": "^4.19.2"
   }
 }
