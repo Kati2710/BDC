@@ -252,11 +252,21 @@ app.post("/chat", async (req, res) => {
       const duration = Date.now() - start;
 
       if (fb.mode === "count") {
-        const total = Number(fb.rows?.[0]?.total || 0);
+        const total = Number(fb.rows?.[0]?.total || fb.rows?.[0]?.total_empresas_ativas || 0);
+        
+        // Converte BigInt em rows
+        const rowsSerializable = fb.rows.map(row => {
+          const newRow = {};
+          for (const [key, value] of Object.entries(row)) {
+            newRow[key] = typeof value === 'bigint' ? Number(value) : value;
+          }
+          return newRow;
+        });
+        
         return res.json({
           answer: `Total: ${total.toLocaleString('pt-BR')} empresa(s)`,
           sql: fb.sql,
-          rows: fb.rows,
+          rows: rowsSerializable,
           duration_ms: duration,
           used_fallback: true,
           debug
@@ -275,10 +285,20 @@ app.post("/chat", async (req, res) => {
       }
 
       const first = fb.rows[0];
+      
+      // Converte BigInt
+      const rowsSerializable = fb.rows.map(row => {
+        const newRow = {};
+        for (const [key, value] of Object.entries(row)) {
+          newRow[key] = typeof value === 'bigint' ? Number(value) : value;
+        }
+        return newRow;
+      });
+      
       return res.json({
         answer: `Encontrei ${fb.rows.length} empresa(s). Primeira: ${first.razao_social || first.nome_fantasia}`,
         sql: fb.sql,
-        rows: fb.rows,
+        rows: rowsSerializable,
         duration_ms: duration,
         used_fallback: true,
         debug
@@ -312,10 +332,21 @@ app.post("/chat", async (req, res) => {
       }
     }
 
+    console.log("📤 Enviando resposta final, answer length:", answer?.length);
+
+    // Converte BigInt em rows também
+    const rowsSerializable = rows.map(row => {
+      const newRow = {};
+      for (const [key, value] of Object.entries(row)) {
+        newRow[key] = typeof value === 'bigint' ? Number(value) : value;
+      }
+      return newRow;
+    });
+
     return res.json({
       answer,
       sql,
-      rows,
+      rows: rowsSerializable,
       duration_ms: duration,
       used_fallback: usedFallback,
       debug
