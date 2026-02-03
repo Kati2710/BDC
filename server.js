@@ -26,7 +26,6 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 
-// Preflight sempre OK
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -36,13 +35,10 @@ app.use(express.json({ limit: "256kb" }));
 
 /* ========================= MOTHERDUCK ========================= */
 const MD_DB = "md:chat_rfb";
-const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
+const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
 
-const db = new duckdb.Database(MD_DB, {
-  motherduck_token: MD_TOKEN
-});
+const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 
-// ✅ queryAll correto (params como array)
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
@@ -55,12 +51,11 @@ function queryAll(sql, params = []) {
 }
 
 /* ========================= CLAUDE ========================= */
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
 const SCHEMA_HINT = `
 Tabela única: chat_rfb.main.empresas
-
 Colunas:
 cnpj_basico, razao_social, natureza_juridica_codigo, natureza_juridica,
 qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social,
@@ -74,19 +69,16 @@ opcao_simples, data_opcao_simples, data_exclusao_simples, opcao_mei,
 data_opcao_mei, data_exclusao_mei
 `;
 
-// ✅ Sanitização robusta: remove ``` ``` e remove ; final em vez de quebrar
 function sanitizeSQL(sql) {
   let s = String(sql || "").trim();
 
-  // remove code fences tipo ```sql ... ```
-  s = s.replace(/```[\s\S]*?```/g, (m) =>
-    m.replace(/```sql|```/gi, "").trim()
-  );
+  // remove ```...``` se vier
+  s = s.replace(/```[\s\S]*?```/g, (m) => m.replace(/```sql|```/gi, "").trim());
 
-  // remove ; no final
+  // remove ; final
   s = s.replace(/;+\s*$/g, "").trim();
 
-  // pega do primeiro SELECT pra frente
+  // pega do primeiro SELECT em diante
   const idx = s.toLowerCase().indexOf("select");
   if (idx === -1) throw new Error("SQL inválida: não encontrei SELECT.");
   s = s.slice(idx).trim();
@@ -95,10 +87,10 @@ function sanitizeSQL(sql) {
   const blocked = /\b(insert|update|delete|drop|alter|create|truncate|copy|attach|detach|pragma|call)\b/i;
   if (blocked.test(s)) throw new Error("SQL bloqueada: comando não permitido.");
 
-  // bloqueia múltiplas instruções
+  // bloqueia múltiplas statements
   if (s.includes(";")) throw new Error("SQL bloqueada: múltiplas instruções.");
 
-  // garante LIMIT quando não for agregação
+  // LIMIT automático se não for agregação
   const isAggregate =
     /\bcount\s*\(|\bgroup\s+by\b|\bsum\s*\(|\bavg\s*\(|\bmin\s*\(|\bmax\s*\(/i.test(s);
 
@@ -108,6 +100,8 @@ function sanitizeSQL(sql) {
 }
 
 async function llmToSQL(userQuery) {
+  if (!anthropic) throw new Error("Claude não configurado (ANTHROPIC_API_KEY ausente).");
+
   const resp = await anthropic.messages.create({
     model: "claude-3-5-sonnet-latest",
     max_tokens: 260,
@@ -117,23 +111,24 @@ async function llmToSQL(userQuery) {
       "Use APENAS a tabela chat_rfb.main.empresas e as colunas fornecidas. " +
       "Gere UMA ÚNICA query SELECT. " +
       "Não use ';'. " +
-      "Para listas, sempre use LIMIT. " +
+      "Para listas, use LIMIT. " +
       "Para contagem, use COUNT(*). " +
       "Não invente tabelas/colunas.",
     messages: [{
       role: "user",
       content:
-        `${SCHEMA_HINT}\n\n` +
-        `Pergunta: ${userQuery}\n\n` +
+        `${SCHEMA_HINT}\n\nPergunta: ${userQuery}\n\n` +
         "Responda SOMENTE com a SQL (sem markdown, sem explicações)."
     }]
   });
 
-  const sqlRaw = resp?.content?.[0]?.text || "";
-  return sanitizeSQL(sqlRaw);
+  const raw = resp?.content?.[0]?.text || "";
+  return sanitizeSQL(raw);
 }
 
 async function llmExplain(userQuery, sql, rows) {
+  if (!anthropic) return null;
+
   const resp = await anthropic.messages.create({
     model: "claude-3-5-sonnet-latest",
     max_tokens: 240,
@@ -141,18 +136,34 @@ async function llmExplain(userQuery, sql, rows) {
     system:
       "Você é um assistente brasileiro, objetivo e amigável. " +
       "Use APENAS os dados retornados. Não invente nada. " +
-      "Se o resultado vier vazio, diga que não encontrou.",
+      "Se vier vazio, diga que não encontrou.",
     messages: [{
       role: "user",
       content:
         `Pergunta: ${userQuery}\n` +
         `SQL executada: ${sql}\n` +
         `Resultado (JSON): ${JSON.stringify(rows)}\n\n` +
-        "Explique o resultado em pt-BR, de forma curta e útil."
+        "Explique em pt-BR de forma curta e útil."
     }]
   });
 
-  return resp?.content?.[0]?.text || "Sem resposta.";
+  return resp?.content?.[0]?.text || null;
+}
+
+/* ========================= FALLBACK (se Claude falhar) ========================= */
+async function fallbackQuery(userQuery) {
+  const digits = userQuery.replace(/\D/g, "");
+  if (digits.length >= 8) {
+    const cnpj = digits.slice(0, 8);
+    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE cnpj_basico = ? LIMIT 5`;
+    const rows = await queryAll(sql, [cnpj]);
+    return { sql, rows };
+  } else {
+    const term = userQuery.toUpperCase();
+    const sql = `SELECT * FROM chat_rfb.main.empresas WHERE upper(razao_social) LIKE ? LIMIT 5`;
+    const rows = await queryAll(sql, [`%${term}%`]);
+    return { sql, rows };
+  }
 }
 
 /* ========================= ROTAS ========================= */
@@ -167,37 +178,86 @@ app.get("/health", (_, res) => {
 
 app.post("/chat", async (req, res) => {
   const start = Date.now();
+  const debug = { stage: "start" };
 
   try {
     const q = String(req.body?.query || "").trim();
     if (!q) {
-      return res.json({ answer: "Consulta vazia." });
+      return res.json({ answer: "Consulta vazia.", debug: { stage: "empty_query" } });
     }
 
-    // 1) Claude gera SQL
-    const sql = await llmToSQL(q);
+    // 1) tenta Claude -> SQL
+    let sql;
+    try {
+      debug.stage = "llm_to_sql";
+      sql = await llmToSQL(q);
+      debug.sql = sql;
+    } catch (e) {
+      // Claude falhou: NÃO quebra, cai no fallback
+      debug.stage = "llm_failed_fallback";
+      debug.error = String(e?.message || e);
 
-    // 2) Executa no MotherDuck
+      const fb = await fallbackQuery(q);
+      const duration = Date.now() - start;
+
+      if (!fb.rows?.length) {
+        return res.json({
+          answer: "Nenhum resultado encontrado.",
+          sql: fb.sql,
+          rows: [],
+          duration_ms: duration,
+          debug
+        });
+      }
+
+      return res.json({
+        answer: `Claude indisponível agora. Mostrando resultados diretos.\nPrimeiro: ${fb.rows[0].razao_social} (CNPJ: ${fb.rows[0].cnpj_basico})`,
+        sql: fb.sql,
+        rows: fb.rows,
+        duration_ms: duration,
+        debug
+      });
+    }
+
+    // 2) executa SQL no MotherDuck
+    debug.stage = "run_sql";
     const rows = await queryAll(sql);
 
-    // 3) Claude explica
-    const answer = await llmExplain(q, sql, rows);
+    // 3) Claude explica (se der erro aqui, também não quebra)
+    debug.stage = "llm_explain";
+    let answer = null;
+    try {
+      answer = await llmExplain(q, sql, rows);
+    } catch (e) {
+      debug.stage = "llm_explain_failed";
+      debug.error = String(e?.message || e);
+    }
+
+    const duration = Date.now() - start;
+
+    // fallback de resposta se explain falhar
+    if (!answer) {
+      if (!rows?.length) answer = "Nenhum resultado encontrado.";
+      else answer = `Resultado obtido (${rows.length} linha(s)).`;
+    }
 
     return res.json({
       answer,
       sql,
       rows,
-      duration_ms: Date.now() - start
+      duration_ms: duration,
+      debug
     });
 
   } catch (e) {
-    console.error("❌ /chat error:", e);
+    // Mesmo erro geral: devolve debug e mensagem
+    debug.stage = debug.stage || "unknown";
+    debug.error = String(e?.message || e);
 
-    // ✅ devolve o erro (pra você debugar no chat)
     return res.status(500).json({
       answer: "Erro interno.",
-      error: String(e?.message || e),
-      duration_ms: Date.now() - start
+      duration_ms: Date.now() - start,
+      debug
     });
   }
 });
