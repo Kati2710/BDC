@@ -424,15 +424,16 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-/* ========================= KEEP-ALIVE ========================= */
-setInterval(async () => {
-  try {
-    await queryAll("SELECT COUNT(*) FROM chat_rfb.main.empresas LIMIT 1");
-    console.log("💓 Heartbeat OK - " + new Date().toLocaleTimeString());
-  } catch (e) {
-    console.error("❌ Heartbeat failed:", e.message);
-  }
-}, 5 * 60 * 1000);
+/* ========================= KEEP-ALIVE DESATIVADO ========================= */
+// Comentado temporariamente devido a erro do DuckDB
+// setInterval(async () => {
+//   try {
+//     await queryAll("SELECT 1");
+//     console.log("💓 Heartbeat OK - " + new Date().toLocaleTimeString());
+//   } catch (e) {
+//     console.error("❌ Heartbeat failed:", e.message);
+//   }
+// }, 5 * 60 * 1000);
 
 /* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
