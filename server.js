@@ -1,10 +1,21 @@
 import express from "express";
 import cors from "cors";
 import duckdb from "duckdb";
+import Anthropic from "@anthropic-ai/sdk";
 
 const app = express();
 
-/* ========================= CORS ========================= */
+/* ========================= CONFIG ========================= */
+const PORT = process.env.PORT || 10000;
+
+// MotherDuck
+const MD_DB = "md:chat_rfb";
+const MD_TOKEN = process.env.MOTHERDUCK_TOKEN;
+
+// Claude (Anthropic)
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+
+// CORS whitelist
 const allowedOrigins = new Set([
   "https://brazildatacorp.com",
   "https://www.brazildatacorp.com",
@@ -12,19 +23,20 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:5500",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  "null"
+  "null" // file://
 ]);
 
+/* ========================= CORS ========================= */
 const corsOptions = {
   origin: (origin, cb) => {
     console.log("🔍 Origin:", origin || "NO ORIGIN");
 
-    // requests sem Origin (curl/postman)
+    // sem Origin: curl/postman
     if (!origin) return cb(null, true);
 
     if (allowedOrigins.has(origin)) return cb(null, true);
 
-    // IMPORTANT: em vez de lançar erro, responde CORS negado de forma controlada
+    // bloqueia sem "jogar erro" (evita vários bugs de preflight)
     return cb(null, false);
   },
   methods: ["GET", "POST", "OPTIONS"],
@@ -32,34 +44,25 @@ const corsOptions = {
   optionsSuccessStatus: 204
 };
 
-// aplica CORS
 app.use(cors(corsOptions));
 
-// responde preflight SEM depender do app.options("*")
+// Preflight sempre responde 204
 app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-/* ========================= MOTHERDUCK ========================= */
-const MD_TOKEN = process.env.MOTHERDUCK_TOKEN; // configure no Render
-const MD_DB = "md:chat_rfb";
+app.use(express.json({ limit: "256kb" }));
 
+/* ========================= DUCKDB / MOTHERDUCK ========================= */
 const db = new duckdb.Database(MD_DB, {
   motherduck_token: MD_TOKEN
 });
 
-/**
- * queryAll(sql, params)
- * - DuckDB Node aceita params como ARRAY: conn.all(sql, params, cb)
- * - Isso evita bug/ambiguidade com spread ...params
- */
+// ✅ queryAll CORRETO: params como array
 function queryAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
-
     conn.all(sql, params, (err, rows) => {
       conn.close();
       if (err) return reject(err);
@@ -68,91 +71,66 @@ function queryAll(sql, params = []) {
   });
 }
 
+/* ========================= CLAUDE (HUMANIZER) ========================= */
+const anthropic = ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: ANTHROPIC_API_KEY })
+  : null;
+
+async function humanizeAnswer({ query, rows }) {
+  // se não tem chave ou não tem resultado, nem chama
+  if (!anthropic) return null;
+  if (!rows?.length) return null;
+
+  // manda só dados necessários (reduz custo e evita vazamento)
+  const compact = rows.slice(0, 5).map((r) => ({
+    cnpj_basico: r.cnpj_basico,
+    razao_social: r.razao_social,
+    natureza_juridica: r.natureza_juridica,
+    municipio: r.municipio,
+    uf: r.uf
+  }));
+
+  const resp = await anthropic.messages.create({
+    model: "claude-3-5-sonnet-latest",
+    max_tokens: 220,
+    temperature: 0.6,
+    system:
+      "Você é um assistente brasileiro, objetivo e amigável. " +
+      "Use APENAS os dados fornecidos. " +
+      "Não invente informações, não assuma nada. " +
+      "Se algo não constar, diga que não consta.",
+    messages: [
+      {
+        role: "user",
+        content:
+          `Consulta do usuário: ${query}\n\n` +
+          `Resultados (JSON):\n${JSON.stringify(compact, null, 2)}\n\n` +
+          "Crie uma resposta humana em pt-BR com:\n" +
+          "1) Uma frase dizendo quantos resultados encontrou.\n" +
+          "2) Destaque do 1º resultado.\n" +
+          "3) Uma sugestão do que pesquisar a seguir (ex.: termo mais específico, cidade/UF, CNPJ completo).\n"
+      }
+    ]
+  });
+
+  return resp?.content?.[0]?.text || null;
+}
+
 /* ========================= ROTAS ========================= */
 app.get("/health", (_, res) => {
-  res.json({ ok: true, timestamp: new Date().toISOString() });
+  res.json({
+    ok: true,
+    timestamp: new Date().toISOString(),
+    motherduck: MD_TOKEN ? "configured" : "missing",
+    claude: ANTHROPIC_API_KEY ? "configured" : "missing"
+  });
 });
 
 app.post("/chat", async (req, res) => {
   const startTime = Date.now();
-  console.log("📨 POST /chat received");
 
   try {
-    const q = String(req.body?.query || "").trim();
-    console.log("🔎 Query:", q);
+    console.log("📨 POST /chat");
+    console.log("📦 Body:", req.body);
 
-    if (!q) {
-      return res.json({ answer: "Consulta vazia." });
-    }
-
-    const digits = q.replace(/\D/g, "");
-    let rows = [];
-
-    if (digits.length >= 8) {
-      const cnpj = digits.slice(0, 8);
-      console.log("🏢 Buscando por CNPJ:", cnpj);
-
-      rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas
-         WHERE cnpj_basico = ?
-         LIMIT 5`,
-        [cnpj]
-      );
-    } else {
-      const term = q.toUpperCase();
-      console.log("📝 Buscando por razão social:", term);
-
-      rows = await queryAll(
-        `SELECT * FROM chat_rfb.main.empresas
-         WHERE upper(razao_social) LIKE ?
-         LIMIT 5`,
-        [`%${term}%`]
-      );
-    }
-
-    const duration = Date.now() - startTime;
-    console.log(`✅ Query executada em ${duration}ms, ${rows?.length || 0} resultados`);
-
-    if (!rows?.length) {
-      return res.json({
-        answer: "Nenhum resultado encontrado.",
-        query: q,
-        duration_ms: duration
-      });
-    }
-
-    const r = rows[0];
-    return res.json({
-      answer: `Encontrei ${rows.length} resultado(s).\nPrimeiro: ${r.razao_social} (CNPJ: ${r.cnpj_basico})`,
-      rows,
-      query: q,
-      duration_ms: duration
-    });
-
-  } catch (e) {
-    console.error("❌ CHAT ERROR:", e);
-
-    return res.status(500).json({
-      answer: "Erro interno no chat.",
-      error: process.env.NODE_ENV === "development" ? e.message : undefined
-    });
-  }
-});
-
-// Middleware de erro global
-app.use((err, req, res, next) => {
-  console.error("❌ Global error:", err);
-  res.status(500).json({
-    error: "Internal server error",
-    message: process.env.NODE_ENV === "development" ? err.message : undefined
-  });
-});
-
-/* ========================= START ========================= */
-const PORT = process.env.PORT || 10000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 BDC API rodando na porta ${PORT}`);
-  console.log(`📍 Modo: ${process.env.NODE_ENV || "production"}`);
-  console.log(`🔐 Motherduck: ${MD_TOKEN ? "✅ configurado" : "❌ faltando"}`);
-});
+    const q = String(req
