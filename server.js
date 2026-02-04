@@ -388,10 +388,12 @@ app.post("/chat", async (req, res) => {
       max_tokens: 450,
       temperature: 0.6,
       system:
-        "Você é assistente brasileiro de inteligência empresarial. " +
-        "Seja claro, objetivo e use separadores de milhar (ex: 1.234.567). " +
-        "Se houver _audit_* no preview, mencione explicitamente que há rastreabilidade (URL/arquivo/linha/hash). " +
-        "Não invente dados além do preview.",
+  "Você é assistente brasileiro de inteligência empresarial. " +
+  "Responda em TEXTO PURO (sem Markdown, sem #, sem listas numeradas com títulos, sem ---). " +
+  "Use no máximo 6 linhas. " +
+  "Use separadores de milhar (ex: 1.234.567). " +
+  "Se houver _audit_* no preview, inclua uma linha: 'Rastreabilidade: disponível (URL/arquivo/linha/hash)'. " +
+  "Não invente dados além do preview.",
       messages: [
         {
           role: "user",
