@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import duckdb from "duckdb";
@@ -12,11 +13,52 @@ import Anthropic from "@anthropic-ai/sdk";
    - Retorno: preview + (opcional) total_rows
    - ✅ Auditoria obrigatória para PortaldaTransparencia.* (_audit_*)
    - ✅ audit_sample padronizado para o front
+   - ✅ dataset_meta (fonte + período Jan/2026 + origem oficial)
+   - ✅ EXPLAIN em TEXTO PURO (sem Markdown)
 ============================================================ */
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+/* ========================= METADADOS DAS BASES ========================= */
+const DATASETS_META = {
+  receita_federal_janeiro2026: {
+    id: "receita_federal_cnpj_janeiro2026",
+    fonte: "Receita Federal do Brasil",
+    base: "Cadastro Nacional da Pessoa Jurídica (CNPJ)",
+    periodo: "Janeiro/2026",
+    origem_url: "https://arquivos.receitafederal.gov.br",
+    tabelas_match: [
+      "chat_rfb.main.empresas_janeiro2026",
+      "chat_rfb.main.empresas_chat_janeiro2026",
+    ],
+  },
+  portal_transparencia: {
+    id: "portal_transparencia_sancoes",
+    fonte: "Portal da Transparência — CGU",
+    base: "Sanções e Acordos Administrativos",
+    periodicidade: "Atualização contínua (conforme publicação oficial)",
+    origem_url: "https://portaldatransparencia.gov.br",
+    tabelas_match: ["PortaldaTransparencia.main."],
+  },
+};
+
+function detectDatasetMeta(sql) {
+  const s = (sql || "").toLowerCase();
+
+  // Receita Federal (Jan/2026)
+  if (s.includes("empresas_janeiro2026") || s.includes("empresas_chat_janeiro2026")) {
+    return DATASETS_META.receita_federal_janeiro2026;
+  }
+
+  // Portal da Transparência
+  if (s.includes("portaldatransparencia.")) {
+    return DATASETS_META.portal_transparencia;
+  }
+
+  return null;
+}
 
 /* ========================= MOTHERDUCK ========================= */
 const MD_DB = "md:chat_rfb";
@@ -110,7 +152,7 @@ REGRAS CRÍTICAS PARA GERAR SQL:
    - SEMPRE use aspas duplas: "NOME DO SANCIONADO"
 
 6. AUDITORIA (Portal da Transparência):
-   - Sempre inclua no SELECT quando consultar PortaldaTransparencia:
+   - Se consultar PortaldaTransparencia, inclua no SELECT:
      _audit_url_download,
      _audit_data_disponibilizacao_gov,
      _audit_periodicidade_atualizacao_gov,
@@ -119,7 +161,7 @@ REGRAS CRÍTICAS PARA GERAR SQL:
      _audit_row_hash
 
 7. PERFORMANCE:
-   - Se NÃO for agregação, sempre use LIMIT (padrão 50).
+   - Se NÃO for agregação, sempre use LIMIT.
    - Evite SELECT *.
 `;
 
@@ -278,14 +320,14 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
     "Você é especialista SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
     "Use nomes completos (catalog.schema.table). " +
     "Somente SELECT/CTE. " +
-    "Se não for agregação, sempre inclua LIMIT.";
+    "Se não for agregação, sempre inclua LIMIT. " +
+    "Evite SELECT *.";
 
   const auditRule = auditRequired
     ? (
         "REGRA OBRIGATÓRIA DE AUDITORIA:\n" +
         "- Se consultar qualquer tabela do catálogo 'PortaldaTransparencia', o SELECT deve incluir SEMPRE:\n" +
-        `  ${AUDIT_COLS.join(", ")}\n` +
-        "- Evite SELECT *.\n"
+        `  ${AUDIT_COLS.join(", ")}\n`
       )
     : "";
 
@@ -300,8 +342,7 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
         content:
           `${schema}\n\n` +
           `PERGUNTA DO USUÁRIO: "${userQuery}"\n\n` +
-          `Gere a SQL (somente SELECT/CTE). ` +
-          `Se não for agregação, use LIMIT ${previewLimit}.`,
+          `Gere a SQL (somente SELECT/CTE). Se não for agregação, use LIMIT ${previewLimit}.`,
       },
     ],
   });
@@ -329,24 +370,23 @@ app.post("/chat", async (req, res) => {
     // 1) Schema
     const schema = await getSchema();
 
-    // 2) Gera SQL (1ª tentativa)
+    // 2) SQL
     console.log("🤖 Claude gerando SQL...");
     let rawSql = await generateSQL({ schema, userQuery, previewLimit, auditRequired: true });
 
     let sql = enforceLimit(cleanSQL(rawSql), previewLimit);
 
-    // ✅ Se tocar Portal e não tiver auditoria, tenta uma segunda vez (mais duro)
+    // ✅ Auditoria obrigatória para Portal
     if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
       console.log("⚠️  SQL tocou Portal mas faltou _audit_* → regenerando...");
       rawSql = await generateSQL({
         schema,
-        userQuery: userQuery + " (IMPORTANTE: inclua as colunas _audit_* obrigatórias no SELECT.)",
+        userQuery: userQuery + " (IMPORTANTE: inclua TODAS as colunas _audit_* obrigatórias no SELECT.)",
         previewLimit,
         auditRequired: true,
       });
       sql = enforceLimit(cleanSQL(rawSql), previewLimit);
 
-      // Se ainda falhar, bloqueia (garantia institucional)
       if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
         throw new Error("SQL inválida: consulta ao Portal exige colunas _audit_* no SELECT (auditoria obrigatória).");
       }
@@ -360,10 +400,10 @@ app.post("/chat", async (req, res) => {
     const previewRows = coerceBigIntRows(previewRowsRaw);
     console.log(`📊 Preview: ${previewRows.length} linha(s)`);
 
-    // ✅ audit_sample padronizado (para UI)
     const audit_sample = extractAuditSample(previewRows);
+    const dataset_meta = detectDatasetMeta(sql);
 
-    // 3b) Total (opcional)
+    // 3b) Total
     let totalRows = null;
     let countSql = null;
 
@@ -381,30 +421,30 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // 4) Explain
+    // 4) Explain (TEXTO PURO)
     console.log("💬 Claude explicando resultado...");
     const llmExplain = await anthropic.messages.create({
       model: MODEL_EXPLAIN,
-      max_tokens: 450,
-      temperature: 0.6,
+      max_tokens: 300,
+      temperature: 0.4,
       system:
-  "Você é assistente brasileiro de inteligência empresarial. " +
-  "Responda em TEXTO PURO (sem Markdown, sem #, sem listas numeradas com títulos, sem ---). " +
-  "Use no máximo 6 linhas. " +
-  "Use separadores de milhar (ex: 1.234.567). " +
-  "Se houver _audit_* no preview, inclua uma linha: 'Rastreabilidade: disponível (URL/arquivo/linha/hash)'. " +
-  "Não invente dados além do preview.",
+        "Você é assistente brasileiro de inteligência empresarial. " +
+        "Responda em TEXTO PURO (sem Markdown, sem #, sem '---', sem listas numeradas). " +
+        "Use no máximo 6 linhas. " +
+        "Use separadores de milhar (ex: 1.234.567). " +
+        "Se houver _audit_* no preview, inclua uma linha: 'Rastreabilidade: disponível (URL/arquivo/linha/hash)'. " +
+        "Sugira no máximo 2 filtros curtos. " +
+        "Não invente dados além do preview.",
       messages: [
         {
           role: "user",
           content:
             `Pergunta: "${userQuery}"\n\n` +
             `SQL executada (preview):\n${sql}\n\n` +
-            (countSql ? `SQL de total (COUNT):\n${countSql}\n\n` : "") +
-            (totalRows !== null ? `Total de linhas (COUNT): ${totalRows}\n\n` : "") +
+            (dataset_meta ? `Dataset meta:\n${JSON.stringify(dataset_meta, null, 2)}\n\n` : "") +
             (audit_sample ? `Audit sample:\n${JSON.stringify(audit_sample, null, 2)}\n\n` : "") +
             `Preview (primeiras 5 linhas):\n${JSON.stringify(previewRows.slice(0, 5), null, 2)}\n\n` +
-            `Explique o resultado em português (curto e direto) e sugira 1-2 próximos filtros úteis:`,
+            `Responda agora (texto puro):`,
         },
       ],
     });
@@ -413,7 +453,6 @@ app.post("/chat", async (req, res) => {
     const duration = Date.now() - startTime;
 
     console.log("✅ CONCLUÍDO em", duration, "ms");
-    console.log("📤 Resposta:", answer.slice(0, 140) + (answer.length > 140 ? "..." : ""), "\n");
 
     return res.json({
       answer,
@@ -421,8 +460,9 @@ app.post("/chat", async (req, res) => {
       rows_preview: previewRows,
       preview_count: previewRows.length,
       total_rows: totalRows,
-      audit_sample,                 // ✅ sempre que existir _audit_ no resultado
-      audit_required: touchesPortal(sql), // ✅ indica quando a query tocou Portal
+      audit_sample,
+      audit_required: touchesPortal(sql),
+      dataset_meta,
       duration_ms: duration,
     });
   } catch (err) {
