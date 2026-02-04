@@ -7,10 +7,11 @@ import Anthropic from "@anthropic-ai/sdk";
    CHAT-RFB API (MotherDuck + Claude)
    - Cache de schema (1h)
    - Geração de SQL segura (somente SELECT)
-   - Bloqueios anti-exfiltração / comandos perigosos
+   - Bloqueios anti-exfiltração / comandos perigosos (com regex)
+   - LOGA o motivo exato do bloqueio
    - LIMIT automático (quando não for agregação)
-   - Retorno com preview (evita JSON gigante)
-   - Opcional: total_rows via COUNT(*) (sem estourar resposta)
+   - Retorno somente preview (evita JSON gigante)
+   - Opcional: total_rows via COUNT(*) (include_total=true)
 ============================================================ */
 
 const app = express();
@@ -20,8 +21,6 @@ app.use(express.json({ limit: "1mb" }));
 /* ========================= MOTHERDUCK ========================= */
 const MD_DB = "md:chat_rfb";
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
-
-// ⚠️ Se você rodar local sem token, vai falhar ao acessar md:
 const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 
 function queryMD(sql) {
@@ -38,14 +37,10 @@ function queryMD(sql) {
 /* ========================= SCHEMA COM CACHE ========================= */
 let cachedSchema = null;
 let cacheExpiry = null;
-const CACHE_DURATION = 3600000; // 1h
+const CACHE_DURATION = 3600000; // 1 hora
 
-// Escolha “catálogos” relevantes
-const ALLOWED_CATALOGS = new Set(["chat_rfb", "PortaldaTransparencia"]);
 const ALLOWED_SCHEMA = "main";
-
-// Se você quiser reduzir contexto, coloque “tabelas prioritárias” aqui:
-const PRIORITY_TABLES = null; // ex: new Set(["empresas", "_ceis_auditado_limpo"])
+const ALLOWED_CATALOGS = ["chat_rfb", "PortaldaTransparencia"];
 
 async function getSchema() {
   if (cachedSchema && Date.now() < cacheExpiry) {
@@ -55,7 +50,6 @@ async function getSchema() {
 
   console.log("🔄 Buscando schema do MotherDuck...");
 
-  // Busca tabelas relevantes
   const allTables = await queryMD(`
     SELECT table_catalog, table_schema, table_name
     FROM information_schema.tables
@@ -64,29 +58,20 @@ async function getSchema() {
     ORDER BY table_catalog, table_name
   `);
 
-  let tables = allTables;
-
-  // Se quiser restringir a um subconjunto de tabelas “prioritárias”
-  if (PRIORITY_TABLES instanceof Set) {
-    tables = allTables.filter(t => PRIORITY_TABLES.has(t.table_name));
-  }
-
-  console.log(`📋 Encontradas ${tables.length} tabelas relevantes`);
+  console.log(`📋 Encontradas ${allTables.length} tabelas relevantes`);
 
   let schema = "TABELAS E COLUNAS DISPONÍVEIS:\n\n";
 
-  // ⚡ Evita loop com trocentas conexões: usa queryMD mesmo, mas é ok.
-  // (Se quiser ultra-perf, dá pra puxar columns de uma vez e agrupar.)
-  for (const t of tables) {
-    const fullName = `${t.table_catalog}.${t.table_schema}.${t.table_name}`;
+  for (const table of allTables) {
+    const fullName = `${table.table_catalog}.${table.table_schema}.${table.table_name}`;
     console.log(`  ├─ ${fullName}`);
 
     const columns = await queryMD(`
       SELECT column_name, data_type
       FROM information_schema.columns
-      WHERE table_catalog = '${t.table_catalog}'
-        AND table_schema = '${t.table_schema}'
-        AND table_name = '${t.table_name}'
+      WHERE table_catalog = '${table.table_catalog}'
+        AND table_schema = '${table.table_schema}'
+        AND table_name = '${table.table_name}'
       ORDER BY ordinal_position
     `);
 
@@ -104,8 +89,9 @@ REGRAS CRÍTICAS PARA GERAR SQL:
 ═══════════════════════════════════════════════════════════════
 
 1. PERMISSÃO:
-   - Somente SELECT (sem INSERT/UPDATE/DELETE/DDL)
-   - Não use PRAGMA / ATTACH / INSTALL / LOAD / COPY / EXPORT / CALL / SET
+   - Somente SELECT (ou WITH ... SELECT)
+   - NÃO use: PRAGMA / ATTACH / INSTALL / LOAD / COPY / EXPORT / CALL / SET
+   - NÃO use funções read_* (read_csv/read_parquet/read_json/read_ndjson)
 
 2. CONTAGEM:
    - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
@@ -125,34 +111,15 @@ REGRAS CRÍTICAS PARA GERAR SQL:
    - SEMPRE use aspas duplas: "NOME DO SANCIONADO"
 
 6. AUDITORIA:
-   - URL de origem: _audit_url_download
+   - URL: _audit_url_download
    - Data gov: _audit_data_disponibilizacao_gov
    - Periodicidade: _audit_periodicidade_atualizacao_gov
    - Linha CSV: _audit_linha_csv
-   - Hash linha: _audit_row_hash
+   - Hash: _audit_row_hash
 
 7. PERFORMANCE:
-   - Se a query NÃO for agregação, use LIMIT 50 (ou menor se o usuário pedir).
+   - Se NÃO for agregação, sempre use LIMIT (padrão 50).
    - Evite SELECT * em tabelas grandes.
-
-8. TECNOLOGIA (CNAEs sem hífen):
-   - 6201501, 6201502, 6202300, 6203100, 6204000, 6209100
-
-EXEMPLOS:
-
--- Empresas ativas de SP com sanções (COM AUDITORIA):
-SELECT 
-  e.razao_social, 
-  e.uf, 
-  c."CATEGORIA DA SANÇÃO",
-  c._audit_url_download,
-  c._audit_data_disponibilizacao_gov,
-  c._audit_linha_csv
-FROM chat_rfb.main.empresas e
-INNER JOIN PortaldaTransparencia.main._ceis_auditado_limpo c
-  ON CAST(c."CPF OU CNPJ DO SANCIONADO" AS VARCHAR) = CAST(e.cnpj AS VARCHAR)
-WHERE e.situacao_cadastral = 'ATIVA' AND e.uf = 'SP'
-LIMIT 50;
 `;
 
   cachedSchema = schema;
@@ -165,29 +132,11 @@ LIMIT 50;
 /* ========================= CLAUDE ========================= */
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-/**
- * Segurança SQL:
- * - remove code fences
- * - bloqueia múltiplas statements
- * - permite somente SELECT / WITH ... SELECT
- * - bloqueia comandos perigosos de DuckDB/MotherDuck
- */
-const BLOCKED_SQL_TOKENS = [
-  // DDL/DML
-  "insert", "update", "delete", "drop", "alter", "create", "truncate", "merge", "grant", "revoke",
-  // DuckDB/MotherDuck comandos perigosos / exfil
-  "pragma", "attach", "detach", "install", "load", "copy", "export", "call", "set",
-  "create secret", "secret", "httpfs", "s3", "gcs", "azure",
-  "read_csv", "read_parquet", "read_json", "read_ndjson",
-];
-
 function stripFences(sql) {
   return sql.replace(/```sql|```/gi, "").trim();
 }
 
 function hasMultipleStatements(sql) {
-  // impede "SELECT ...; SELECT ...;" e afins
-  // (permitimos no máximo 1 ";" no final)
   const s = sql.trim();
   const semiCount = (s.match(/;/g) || []).length;
   if (semiCount === 0) return false;
@@ -200,33 +149,61 @@ function isSelectLike(sql) {
   return s.startsWith("select") || s.startsWith("with");
 }
 
-function containsBlockedTokens(sql) {
-  const s = sql.toLowerCase();
-  return BLOCKED_SQL_TOKENS.some(tok => s.includes(tok));
+/**
+ * ✅ Bloqueio por regex (evita falso positivo de "set" dentro de outras palavras)
+ * e retorna o motivo exato do bloqueio.
+ */
+const BLOCKED_SQL_PATTERNS = [
+  // DDL/DML
+  /\b(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke)\b/i,
+
+  // DuckDB/MotherDuck perigosos / exfil
+  /\bpragma\b/i,
+  /\battach\b/i,
+  /\bdetach\b/i,
+  /\binstall\b/i,
+  /\bload\b/i,
+  /\bcopy\b/i,
+  /\bexport\b/i,
+  /\bcall\b/i,
+  /\bset\b/i,
+
+  // Secrets / conectores cloud
+  /\bcreate\s+secret\b/i,
+  /\bsecret\b/i,
+  /\bhttpfs\b/i,
+  /\bs3\b/i,
+  /\bgcs\b/i,
+  /\bazure\b/i,
+
+  // Leitores externos
+  /\bread_(csv|parquet|json|ndjson)\b/i,
+];
+
+function findBlockedReason(sql) {
+  for (const rx of BLOCKED_SQL_PATTERNS) {
+    const m = sql.match(rx);
+    if (m) return `Padrão bloqueado: ${rx} (match: "${m[0]}")`;
+  }
+  return null;
 }
 
 function cleanSQL(sqlRaw) {
   let s = stripFences(sqlRaw).replace(/\s+/g, " ").trim();
-
-  // remove ; final (se existir)
   s = s.replace(/;+$/g, "");
 
   if (!isSelectLike(s)) throw new Error("SQL inválida: somente SELECT/CTE é permitido.");
   if (hasMultipleStatements(s)) throw new Error("SQL inválida: múltiplas statements bloqueadas.");
-  if (containsBlockedTokens(s)) throw new Error("SQL bloqueada: contém operação/comando não permitido.");
-  if (/--|\/\*/.test(s)) {
-    // comentários podem esconder payload; opcional bloquear
-    // se quiser permitir, remova esta regra
-    throw new Error("SQL bloqueada: comentários não são permitidos.");
-  }
+
+  // 🔒 Anti-obfuscação (opcional): bloqueia comentários
+  if (/--|\/\*/.test(s)) throw new Error("SQL bloqueada: comentários não são permitidos.");
+
+  const reason = findBlockedReason(s);
+  if (reason) throw new Error(`SQL bloqueada: contém operação/comando não permitido. (${reason})`);
 
   return s;
 }
 
-/**
- * Detecta se a query é “agregação” para decidir LIMIT automático.
- * Heurística simples: presença de COUNT/SUM/AVG/MIN/MAX/GROUP BY/DISTINCT agregado
- */
 function looksAggregated(sql) {
   const s = sql.toLowerCase();
   return (
@@ -235,9 +212,7 @@ function looksAggregated(sql) {
     s.includes(" avg(") ||
     s.includes(" min(") ||
     s.includes(" max(") ||
-    s.includes(" group by ") ||
-    // DISTINCT sozinho às vezes ainda retorna muitas linhas; não contar como agregação:
-    false
+    s.includes(" group by ")
   );
 }
 
@@ -246,25 +221,13 @@ function hasLimit(sql) {
 }
 
 function enforceLimit(sql, limit = 50) {
-  if (looksAggregated(sql)) return sql; // agregação normalmente retorna pouco
+  if (looksAggregated(sql)) return sql;
   if (hasLimit(sql)) return sql;
   return `${sql} LIMIT ${limit}`;
 }
 
-/**
- * Transformar SELECT em COUNT(*) para total_rows (sem LIMIT).
- * Se falhar (CTE complexo), a API segue sem total.
- */
 function toCountQuery(sql) {
-  // remove LIMIT se existir
   const noLimit = sql.replace(/\slimit\s+\d+/i, "").trim();
-
-  // se for CTE, envelopa
-  if (noLimit.toLowerCase().startsWith("with")) {
-    return `SELECT COUNT(*) AS total_rows FROM (${noLimit}) t`;
-  }
-
-  // caso normal
   return `SELECT COUNT(*) AS total_rows FROM (${noLimit}) t`;
 }
 
@@ -278,27 +241,29 @@ function coerceBigIntRows(rows) {
   });
 }
 
-/* ========================= CONFIG API ========================= */
+/* ========================= CONFIG ========================= */
 const DEFAULT_PREVIEW_LIMIT = 50;
-const MAX_PREVIEW_LIMIT = 200; // evita abuso
+const MAX_PREVIEW_LIMIT = 200;
+
+// Pode sobrescrever por env:
 const MODEL_SQL = process.env.ANTHROPIC_MODEL_SQL || "claude-sonnet-4-5-20250929";
 const MODEL_EXPLAIN = process.env.ANTHROPIC_MODEL_EXPLAIN || "claude-sonnet-4-5-20250929";
 
-/* ========================= ROTA PRINCIPAL ========================= */
+/* ========================= ROTA ========================= */
 app.post("/chat", async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const query = (req.body?.query || "").trim();
-    const wantTotal = Boolean(req.body?.include_total); // opcional: true/false
+    const userQuery = (req.body?.query || "").trim();
+    const wantTotal = Boolean(req.body?.include_total);
     let previewLimit = Number(req.body?.limit ?? DEFAULT_PREVIEW_LIMIT);
 
-    if (!query) return res.json({ error: "Query vazia" });
+    if (!userQuery) return res.json({ error: "Query vazia" });
     if (!Number.isFinite(previewLimit) || previewLimit <= 0) previewLimit = DEFAULT_PREVIEW_LIMIT;
     previewLimit = Math.min(previewLimit, MAX_PREVIEW_LIMIT);
 
     console.log("\n" + "=".repeat(60));
-    console.log("❓ PERGUNTA:", query);
+    console.log("❓ PERGUNTA:", userQuery);
     console.log("=".repeat(60));
 
     // 1) Schema
@@ -313,14 +278,14 @@ app.post("/chat", async (req, res) => {
       system:
         "Você é especialista SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
         "Use nomes completos (catalog.schema.table). " +
-        "Use CAST para conversão de tipos quando necessário. " +
-        "Se NÃO for agregação, sempre inclua LIMIT.",
+        "Só faça JOIN com chat_rfb.main.empresas se o usuário pedir explicitamente por empresas. " +
+        "Se não for agregação, sempre inclua LIMIT.",
       messages: [
         {
           role: "user",
           content:
             `${schema}\n\n` +
-            `PERGUNTA DO USUÁRIO: "${query}"\n\n` +
+            `PERGUNTA DO USUÁRIO: "${userQuery}"\n\n` +
             `Gere a SQL (somente SELECT/CTE). Se não for agregação, use LIMIT ${previewLimit}.`,
         },
       ],
@@ -330,7 +295,7 @@ app.post("/chat", async (req, res) => {
     let sql = cleanSQL(rawSql);
     sql = enforceLimit(sql, previewLimit);
 
-    console.log("📝 SQL gerada:", sql.slice(0, 200) + (sql.length > 200 ? "..." : ""));
+    console.log("📝 SQL gerada:", sql.slice(0, 220) + (sql.length > 220 ? "..." : ""));
 
     // 3) Executa preview
     console.log("⚡ Executando preview no MotherDuck...");
@@ -350,13 +315,13 @@ app.post("/chat", async (req, res) => {
         const total = totalRes?.[0]?.total_rows;
         totalRows = typeof total === "bigint" ? Number(total) : total ?? null;
       } catch (e) {
-        console.log("⚠️  Falhou COUNT(*) (ok, seguindo sem total):", e.message);
+        console.log("⚠️  Falhou COUNT(*) (seguindo sem total):", e.message);
         totalRows = null;
         countSql = null;
       }
     }
 
-    // 4) Claude explica (com base só nas primeiras linhas)
+    // 4) Claude explica (baseado no preview)
     console.log("💬 Claude explicando resultado...");
     const llmExplain = await anthropic.messages.create({
       model: MODEL_EXPLAIN,
@@ -371,13 +336,12 @@ app.post("/chat", async (req, res) => {
         {
           role: "user",
           content:
-            `Pergunta: "${query}"\n\n` +
+            `Pergunta: "${userQuery}"\n\n` +
             `SQL executada (preview):\n${sql}\n\n` +
             (countSql ? `SQL de total (COUNT):\n${countSql}\n\n` : "") +
-            (totalRows !== null ? `Total de linhas (estimado pelo COUNT): ${totalRows}\n\n` : "") +
-            `Resultado (preview até ${previewLimit} linhas; aqui vão as 5 primeiras):\n` +
-            `${JSON.stringify(previewRows.slice(0, 5), null, 2)}\n\n` +
-            `Explique o resultado em português (curto e direto) e, se fizer sentido, sugira 1-2 próximos filtros úteis:`,
+            (totalRows !== null ? `Total de linhas (COUNT): ${totalRows}\n\n` : "") +
+            `Preview (primeiras 5 linhas):\n${JSON.stringify(previewRows.slice(0, 5), null, 2)}\n\n` +
+            `Explique o resultado em português (curto e direto) e sugira 1-2 próximos filtros úteis:`,
         },
       ],
     });
@@ -386,14 +350,14 @@ app.post("/chat", async (req, res) => {
     const duration = Date.now() - startTime;
 
     console.log("✅ CONCLUÍDO em", duration, "ms");
-    console.log("📤 Resposta:", answer.slice(0, 120) + (answer.length > 120 ? "..." : ""), "\n");
+    console.log("📤 Resposta:", answer.slice(0, 140) + (answer.length > 140 ? "..." : ""), "\n");
 
     return res.json({
       answer,
       sql,
-      rows_preview: previewRows,         // ✅ só preview
-      preview_count: previewRows.length, // ✅ tamanho do preview
-      total_rows: totalRows,             // ✅ se include_total=true e deu certo
+      rows_preview: previewRows,
+      preview_count: previewRows.length,
+      total_rows: totalRows,
       duration_ms: duration,
     });
   } catch (err) {
