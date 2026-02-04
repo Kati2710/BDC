@@ -6,12 +6,12 @@ import Anthropic from "@anthropic-ai/sdk";
 /* ============================================================
    CHAT-RFB API (MotherDuck + Claude)
    - Cache de schema (1h)
-   - Geração de SQL segura (somente SELECT)
-   - Bloqueios anti-exfiltração / comandos perigosos (com regex)
-   - LOGA o motivo exato do bloqueio
+   - Somente SELECT/CTE (seguro)
+   - Regex anti-comandos perigosos + motivo exato
    - LIMIT automático (quando não for agregação)
-   - Retorno somente preview (evita JSON gigante)
-   - Opcional: total_rows via COUNT(*) (include_total=true)
+   - Retorno: preview + (opcional) total_rows
+   - ✅ Auditoria obrigatória para PortaldaTransparencia.* (_audit_*)
+   - ✅ audit_sample padronizado para o front
 ============================================================ */
 
 const app = express();
@@ -37,7 +37,7 @@ function queryMD(sql) {
 /* ========================= SCHEMA COM CACHE ========================= */
 let cachedSchema = null;
 let cacheExpiry = null;
-const CACHE_DURATION = 3600000; // 1 hora
+const CACHE_DURATION = 3600000;
 
 const ALLOWED_SCHEMA = "main";
 const ALLOWED_CATALOGS = ["chat_rfb", "PortaldaTransparencia"];
@@ -91,35 +91,36 @@ REGRAS CRÍTICAS PARA GERAR SQL:
 1. PERMISSÃO:
    - Somente SELECT (ou WITH ... SELECT)
    - NÃO use: PRAGMA / ATTACH / INSTALL / LOAD / COPY / EXPORT / CALL / SET
-   - NÃO use funções read_* (read_csv/read_parquet/read_json/read_ndjson)
+   - NÃO use read_* (read_csv/read_parquet/read_json/read_ndjson)
 
 2. CONTAGEM:
    - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
    - Estabelecimentos: COUNT(*)
 
-3. FILTROS COMUNS RFB:
+3. FILTROS RFB:
    - Ativas: WHERE situacao_cadastral = 'ATIVA'
-   - Por estado: WHERE uf = 'SP'
+   - Por UF: WHERE uf = 'SP'
    - MEI: WHERE opcao_mei = 'S'
    - Simples: WHERE opcao_simples = 'S'
 
-4. JOIN COMPLIANCE (CEIS/CNEP + RFB):
-   - CNPJ como string: CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR)
-   - Comparar com: CAST(e.cnpj AS VARCHAR)
+4. JOIN COMPLIANCE:
+   - CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR) = CAST(e.cnpj AS VARCHAR)
 
 5. COLUNAS COM ESPAÇOS:
    - SEMPRE use aspas duplas: "NOME DO SANCIONADO"
 
-6. AUDITORIA:
-   - URL: _audit_url_download
-   - Data gov: _audit_data_disponibilizacao_gov
-   - Periodicidade: _audit_periodicidade_atualizacao_gov
-   - Linha CSV: _audit_linha_csv
-   - Hash: _audit_row_hash
+6. AUDITORIA (Portal da Transparência):
+   - Sempre inclua no SELECT quando consultar PortaldaTransparencia:
+     _audit_url_download,
+     _audit_data_disponibilizacao_gov,
+     _audit_periodicidade_atualizacao_gov,
+     _audit_arquivo_csv_origem,
+     _audit_linha_csv,
+     _audit_row_hash
 
 7. PERFORMANCE:
    - Se NÃO for agregação, sempre use LIMIT (padrão 50).
-   - Evite SELECT * em tabelas grandes.
+   - Evite SELECT *.
 `;
 
   cachedSchema = schema;
@@ -149,15 +150,8 @@ function isSelectLike(sql) {
   return s.startsWith("select") || s.startsWith("with");
 }
 
-/**
- * ✅ Bloqueio por regex (evita falso positivo de "set" dentro de outras palavras)
- * e retorna o motivo exato do bloqueio.
- */
 const BLOCKED_SQL_PATTERNS = [
-  // DDL/DML
   /\b(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke)\b/i,
-
-  // DuckDB/MotherDuck perigosos / exfil
   /\bpragma\b/i,
   /\battach\b/i,
   /\bdetach\b/i,
@@ -167,16 +161,12 @@ const BLOCKED_SQL_PATTERNS = [
   /\bexport\b/i,
   /\bcall\b/i,
   /\bset\b/i,
-
-  // Secrets / conectores cloud
   /\bcreate\s+secret\b/i,
   /\bsecret\b/i,
   /\bhttpfs\b/i,
   /\bs3\b/i,
   /\bgcs\b/i,
   /\bazure\b/i,
-
-  // Leitores externos
   /\bread_(csv|parquet|json|ndjson)\b/i,
 ];
 
@@ -194,8 +184,6 @@ function cleanSQL(sqlRaw) {
 
   if (!isSelectLike(s)) throw new Error("SQL inválida: somente SELECT/CTE é permitido.");
   if (hasMultipleStatements(s)) throw new Error("SQL inválida: múltiplas statements bloqueadas.");
-
-  // 🔒 Anti-obfuscação (opcional): bloqueia comentários
   if (/--|\/\*/.test(s)) throw new Error("SQL bloqueada: comentários não são permitidos.");
 
   const reason = findBlockedReason(s);
@@ -241,13 +229,85 @@ function coerceBigIntRows(rows) {
   });
 }
 
+/* ========================= AUDIT ENFORCEMENT ========================= */
+const AUDIT_COLS = [
+  "_audit_url_download",
+  "_audit_data_disponibilizacao_gov",
+  "_audit_periodicidade_atualizacao_gov",
+  "_audit_arquivo_csv_origem",
+  "_audit_linha_csv",
+  "_audit_row_hash",
+];
+
+function touchesPortal(sql) {
+  return /\bPortaldaTransparencia\./i.test(sql);
+}
+
+function hasAllAuditCols(sql) {
+  return AUDIT_COLS.every(c => new RegExp(`\\b${c}\\b`, "i").test(sql));
+}
+
+function extractAuditSample(rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const r = rows.find(x => x && typeof x === "object" && Object.keys(x).some(k => k.startsWith("_audit_"))) || rows[0];
+  if (!r || typeof r !== "object") return null;
+
+  const hasAny = Object.keys(r).some(k => k.startsWith("_audit_"));
+  if (!hasAny) return null;
+
+  return {
+    _audit_url_download: r._audit_url_download ?? null,
+    _audit_data_disponibilizacao_gov: r._audit_data_disponibilizacao_gov ?? null,
+    _audit_periodicidade_atualizacao_gov: r._audit_periodicidade_atualizacao_gov ?? null,
+    _audit_arquivo_csv_origem: r._audit_arquivo_csv_origem ?? null,
+    _audit_linha_csv: r._audit_linha_csv ?? null,
+    _audit_row_hash: r._audit_row_hash ?? null,
+  };
+}
+
 /* ========================= CONFIG ========================= */
 const DEFAULT_PREVIEW_LIMIT = 50;
 const MAX_PREVIEW_LIMIT = 200;
 
-// Pode sobrescrever por env:
 const MODEL_SQL = process.env.ANTHROPIC_MODEL_SQL || "claude-sonnet-4-5-20250929";
 const MODEL_EXPLAIN = process.env.ANTHROPIC_MODEL_EXPLAIN || "claude-sonnet-4-5-20250929";
+
+/* ========================= SQL GENERATION (com retry) ========================= */
+async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
+  const baseSystem =
+    "Você é especialista SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
+    "Use nomes completos (catalog.schema.table). " +
+    "Somente SELECT/CTE. " +
+    "Se não for agregação, sempre inclua LIMIT.";
+
+  const auditRule = auditRequired
+    ? (
+        "REGRA OBRIGATÓRIA DE AUDITORIA:\n" +
+        "- Se consultar qualquer tabela do catálogo 'PortaldaTransparencia', o SELECT deve incluir SEMPRE:\n" +
+        `  ${AUDIT_COLS.join(", ")}\n` +
+        "- Evite SELECT *.\n"
+      )
+    : "";
+
+  const llmSQL = await anthropic.messages.create({
+    model: MODEL_SQL,
+    max_tokens: 700,
+    temperature: 0,
+    system: `${baseSystem}\n${auditRule}`,
+    messages: [
+      {
+        role: "user",
+        content:
+          `${schema}\n\n` +
+          `PERGUNTA DO USUÁRIO: "${userQuery}"\n\n` +
+          `Gere a SQL (somente SELECT/CTE). ` +
+          `Se não for agregação, use LIMIT ${previewLimit}.`,
+      },
+    ],
+  });
+
+  return llmSQL.content?.[0]?.text ?? "";
+}
 
 /* ========================= ROTA ========================= */
 app.post("/chat", async (req, res) => {
@@ -269,41 +329,41 @@ app.post("/chat", async (req, res) => {
     // 1) Schema
     const schema = await getSchema();
 
-    // 2) Claude gera SQL
+    // 2) Gera SQL (1ª tentativa)
     console.log("🤖 Claude gerando SQL...");
-    const llmSQL = await anthropic.messages.create({
-      model: MODEL_SQL,
-      max_tokens: 700,
-      temperature: 0,
-      system:
-        "Você é especialista SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
-        "Use nomes completos (catalog.schema.table). " +
-        "Só faça JOIN com chat_rfb.main.empresas se o usuário pedir explicitamente por empresas. " +
-        "Se não for agregação, sempre inclua LIMIT.",
-      messages: [
-        {
-          role: "user",
-          content:
-            `${schema}\n\n` +
-            `PERGUNTA DO USUÁRIO: "${userQuery}"\n\n` +
-            `Gere a SQL (somente SELECT/CTE). Se não for agregação, use LIMIT ${previewLimit}.`,
-        },
-      ],
-    });
+    let rawSql = await generateSQL({ schema, userQuery, previewLimit, auditRequired: true });
 
-    const rawSql = llmSQL.content?.[0]?.text ?? "";
-    let sql = cleanSQL(rawSql);
-    sql = enforceLimit(sql, previewLimit);
+    let sql = enforceLimit(cleanSQL(rawSql), previewLimit);
+
+    // ✅ Se tocar Portal e não tiver auditoria, tenta uma segunda vez (mais duro)
+    if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
+      console.log("⚠️  SQL tocou Portal mas faltou _audit_* → regenerando...");
+      rawSql = await generateSQL({
+        schema,
+        userQuery: userQuery + " (IMPORTANTE: inclua as colunas _audit_* obrigatórias no SELECT.)",
+        previewLimit,
+        auditRequired: true,
+      });
+      sql = enforceLimit(cleanSQL(rawSql), previewLimit);
+
+      // Se ainda falhar, bloqueia (garantia institucional)
+      if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
+        throw new Error("SQL inválida: consulta ao Portal exige colunas _audit_* no SELECT (auditoria obrigatória).");
+      }
+    }
 
     console.log("📝 SQL gerada:", sql.slice(0, 220) + (sql.length > 220 ? "..." : ""));
 
-    // 3) Executa preview
+    // 3) Preview
     console.log("⚡ Executando preview no MotherDuck...");
     const previewRowsRaw = await queryMD(sql);
     const previewRows = coerceBigIntRows(previewRowsRaw);
     console.log(`📊 Preview: ${previewRows.length} linha(s)`);
 
-    // 3b) (Opcional) total_rows
+    // ✅ audit_sample padronizado (para UI)
+    const audit_sample = extractAuditSample(previewRows);
+
+    // 3b) Total (opcional)
     let totalRows = null;
     let countSql = null;
 
@@ -321,7 +381,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // 4) Claude explica (baseado no preview)
+    // 4) Explain
     console.log("💬 Claude explicando resultado...");
     const llmExplain = await anthropic.messages.create({
       model: MODEL_EXPLAIN,
@@ -330,8 +390,8 @@ app.post("/chat", async (req, res) => {
       system:
         "Você é assistente brasileiro de inteligência empresarial. " +
         "Seja claro, objetivo e use separadores de milhar (ex: 1.234.567). " +
-        "Se houver colunas _audit_*, mencione rastreabilidade e origem quando relevante. " +
-        "Não invente dados além do que está no preview.",
+        "Se houver _audit_* no preview, mencione explicitamente que há rastreabilidade (URL/arquivo/linha/hash). " +
+        "Não invente dados além do preview.",
       messages: [
         {
           role: "user",
@@ -340,6 +400,7 @@ app.post("/chat", async (req, res) => {
             `SQL executada (preview):\n${sql}\n\n` +
             (countSql ? `SQL de total (COUNT):\n${countSql}\n\n` : "") +
             (totalRows !== null ? `Total de linhas (COUNT): ${totalRows}\n\n` : "") +
+            (audit_sample ? `Audit sample:\n${JSON.stringify(audit_sample, null, 2)}\n\n` : "") +
             `Preview (primeiras 5 linhas):\n${JSON.stringify(previewRows.slice(0, 5), null, 2)}\n\n` +
             `Explique o resultado em português (curto e direto) e sugira 1-2 próximos filtros úteis:`,
         },
@@ -358,6 +419,8 @@ app.post("/chat", async (req, res) => {
       rows_preview: previewRows,
       preview_count: previewRows.length,
       total_rows: totalRows,
+      audit_sample,                 // ✅ sempre que existir _audit_ no resultado
+      audit_required: touchesPortal(sql), // ✅ indica quando a query tocou Portal
       duration_ms: duration,
     });
   } catch (err) {
