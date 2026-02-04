@@ -6,7 +6,9 @@ import Anthropic from "@anthropic-ai/sdk";
 
 /* ============================================================
    CHAT-RFB API (MotherDuck + Claude)
-   - Cache de schema (1h) com estrutura JSON detalhada
+   ✅ FIX: queryMD usando db.all() (sem connect/close por query)
+   ✅ FIX: retry leve para erro de conexão MotherDuck
+   - Cache de schema (1h)
    - Somente SELECT/CTE (seguro)
    - Regex anti-comandos perigosos + motivo exato
    - LIMIT automático (quando não for agregação)
@@ -16,7 +18,6 @@ import Anthropic from "@anthropic-ai/sdk";
    - dataset_meta (fonte + período Janeiro/2026)
    - EXPLAIN em TEXTO PURO
    - Aliases: chat_rfb.main.empresas → chat_rfb.main.empresas_janeiro2026
-   - CONTAGEM CORRETA DE ARRAYS + ACESSO A CAMPOS ANINHADOS
 ============================================================ */
 
 const app = express();
@@ -77,22 +78,47 @@ const MD_DB = "md:chat_rfb";
 const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
 const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
 
-function queryMD(sql) {
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
-    conn.all(sql, (err, rows) => {
-      conn.close();
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
+function isConnError(err) {
+  const m = String(err?.message || err || "");
+  return (
+    m.includes("Connection was never established") ||
+    m.includes("has been closed already") ||
+    m.includes("Failed to connect") ||
+    m.includes("Connection Error")
+  );
 }
 
-/* ========================= SCHEMA COM CACHE + ESTRUTURA JSON ========================= */
+/**
+ * ✅ db.all (sem connect/close)
+ * ✅ retry leve quando for erro de conexão
+ */
+async function queryMD(sql, { retries = 2, backoffMs = 250 } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const rows = await new Promise((resolve, reject) => {
+        db.all(sql, (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows || []);
+        });
+      });
+      return rows;
+    } catch (err) {
+      if (attempt < retries && isConnError(err)) {
+        const wait = backoffMs * (attempt + 1);
+        console.log(`⚠️ MotherDuck conn falhou (tentativa ${attempt + 1}/${retries + 1}). Retry em ${wait}ms...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw err;
+    }
+  }
+  return [];
+}
+
+/* ========================= SCHEMA COM CACHE ========================= */
 let cachedSchema = null;
 let cacheExpiry = null;
-const CACHE_DURATION = 3600000; // 1 hora
-
+const CACHE_DURATION = 3600000;
 const ALLOWED_SCHEMA = "main";
 
 async function getSchema() {
@@ -102,6 +128,7 @@ async function getSchema() {
   }
 
   console.log("🔄 Buscando schema do MotherDuck...");
+
   const allTables = await queryMD(`
     SELECT table_catalog, table_schema, table_name
     FROM information_schema.tables
@@ -116,7 +143,7 @@ async function getSchema() {
 
   for (const table of allTables) {
     const fullName = `${table.table_catalog}.${table.table_schema}.${table.table_name}`;
-    console.log(` ├─ ${fullName}`);
+    console.log(`  ├─ ${fullName}`);
 
     const columns = await queryMD(`
       SELECT column_name, data_type
@@ -129,36 +156,8 @@ async function getSchema() {
 
     schema += `TABELA: ${fullName}\n`;
     schema += `Colunas (${columns.length}):\n`;
-
     for (const col of columns) {
-      schema += ` • ${col.column_name} (${col.data_type})\n`;
-
-      // Descrição detalhada para campos JSON da RFB
-      const colName = col.column_name.toLowerCase();
-      if (["empresa", "estabelecimentos", "socios", "simples"].includes(colName)) {
-        schema += `   → Estrutura JSON principal (use json_extract_string ou indexação):\n`;
-
-        if (colName === "empresa") {
-          schema += `     • cnpj_basico, razao_social, natureza_juridica, natureza_juridica_codigo,\n`;
-          schema += `     • qualificacao_responsavel, capital_social (DOUBLE), porte, porte_codigo, ente_federativo\n`;
-          schema += `     Exemplo: json_extract_string(empresa, '$.razao_social')\n`;
-        } else if (colName === "estabelecimentos") {
-          schema += `     • ARRAY de objetos → len(estabelecimentos) para contar\n`;
-          schema += `     • Campos principais: cnpj_completo, matriz_filial, situacao_cadastral,\n`;
-          schema += `     • data_situacao_cadastral, cnae_principal, cnaes_secundarios_codigos (array),\n`;
-          schema += `     • logradouro, numero, bairro, cep, uf, municipio, telefone_1\n`;
-          schema += `     Exemplo: estabelecimentos[1].cnpj_completo, estabelecimentos[1].uf\n`;
-        } else if (colName === "socios") {
-          schema += `     • ARRAY de sócios → len(socios) para contar\n`;
-          schema += `     • Campos típicos: cpf_cnpj_socio, nome_socio, qualificacao_socio,\n`;
-          schema += `     • data_entrada_sociedade, representante_legal\n`;
-          schema += `     Exemplo: socios[1].nome_socio, SUM(len(socios)) AS total_socios\n`;
-        } else if (colName === "simples") {
-          schema += `     • opcao_simples ('S'/'N'), data_opcao_simples, data_exclusao_simples,\n`;
-          schema += `     • opcao_mei ('S'/'N'), data_opcao_mei, data_exclusao_mei\n`;
-          schema += `     Exemplo: simples.opcao_mei = 'S' para filtrar MEI\n`;
-        }
-      }
+      schema += `  • ${col.column_name} (${col.data_type})\n`;
     }
     schema += "\n";
   }
@@ -167,32 +166,52 @@ async function getSchema() {
 ═══════════════════════════════════════════════════════════════
 REGRAS CRÍTICAS PARA GERAR SQL:
 ═══════════════════════════════════════════════════════════════
-1. PERMISSÃO: SOMENTE SELECT ou WITH ... SELECT. NUNCA INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA/ATTACH/INSTALL/LOAD/COPY/EXPORT/CALL/SET/read_*
-2. TABELAS CANÔNICAS (RFB): use chat_rfb.main.empresas ou chat_rfb.main.empresas_chat (backend traduz para versionada)
-3. CONTAGEM (MUITO IMPORTANTE - ARRAYS):
-   - Total empresas: COUNT(*)
-   - Total estabelecimentos: SUM(len(estabelecimentos))
-   - Total sócios: SUM(len(socios))
-   - Total CNAEs secundários: SUM(len(estabelecimentos[1].cnaes_secundarios_codigos)) ou similar
-   - NUNCA use COUNT(estabelecimentos) ou COUNT(socios) → ERRADO!
-4. ACESSO A CAMPOS ANINHADOS:
-   - json_extract_string(coluna, '$.chave') para texto
-   - CAST(json_extract_string(empresa, '$.capital_social') AS DOUBLE) para números
-   - Arrays: estabelecimentos[1].chave, socios[1].nome_socio
-   - UF principal: estabelecimentos[1].uf
-   - Razão social: json_extract_string(empresa, '$.razao_social')
-   - MEI/Simples: simples.opcao_mei = 'S', simples.opcao_simples = 'S'
-5. FILTROS COMUNS:
-   - Ativas: estabelecimentos[1].situacao_cadastral = 'ATIVA'
-   - Por UF: estabelecimentos[1].uf = 'MT'
-   - Porte: json_extract_string(empresa, '$.porte') = 'MICRO EMPRESA'
-6. PERFORMANCE: Evite SELECT *. Use LIMIT se não for agregação.
-7. AUDITORIA (Portal da Transparencia): inclua SEMPRE _audit_url_download, _audit_data_disponibilizacao_gov, _audit_periodicidade_atualizacao_gov, _audit_arquivo_csv_origem, _audit_linha_csv, _audit_row_hash
+
+1. PERMISSÃO:
+   - Somente SELECT (ou WITH ... SELECT)
+   - NÃO use: PRAGMA / ATTACH / INSTALL / LOAD / COPY / EXPORT / CALL / SET
+   - NÃO use read_* (read_csv/read_parquet/read_json/read_ndjson)
+
+2. TABELAS CANÔNICAS (RFB):
+   - Use SEMPRE (canônicas):
+     • chat_rfb.main.empresas
+     • chat_rfb.main.empresas_chat
+   - O backend traduz automaticamente para:
+     • chat_rfb.main.empresas_janeiro2026
+     • chat_rfb.main.empresas_chat_janeiro2026
+
+3. CONTAGEM:
+   - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
+
+4. FILTROS RFB:
+   - Ativas: WHERE situacao_cadastral = 'ATIVA'
+   - Por UF: WHERE uf = 'SP'
+   - MEI: WHERE opcao_mei = 'S'
+   - Simples: WHERE opcao_simples = 'S'
+
+5. JOIN COMPLIANCE:
+   - CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR) = CAST(e.cnpj AS VARCHAR)
+
+6. COLUNAS COM ESPAÇOS:
+   - Sempre use aspas duplas
+
+7. AUDITORIA (Portal da Transparência) — OBRIGATÓRIO no SELECT:
+   _audit_url_download,
+   _audit_data_disponibilizacao_gov,
+   _audit_periodicidade_atualizacao_gov,
+   _audit_arquivo_csv_origem,
+   _audit_linha_csv,
+   _audit_row_hash
+
+8. PERFORMANCE:
+   - Se NÃO for agregação, use LIMIT.
+   - Evite SELECT *.
 `;
 
   cachedSchema = schema;
   cacheExpiry = Date.now() + CACHE_DURATION;
   console.log("✅ Schema em cache por 1 hora\n");
+
   return schema;
 }
 
@@ -202,7 +221,6 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 function stripFences(sql) {
   return sql.replace(/```sql|```/gi, "").trim();
 }
-
 function hasMultipleStatements(sql) {
   const s = sql.trim();
   const semiCount = (s.match(/;/g) || []).length;
@@ -210,7 +228,6 @@ function hasMultipleStatements(sql) {
   if (semiCount === 1 && s.endsWith(";")) return false;
   return true;
 }
-
 function isSelectLike(sql) {
   const s = sql.trim().toLowerCase();
   return s.startsWith("select") || s.startsWith("with");
@@ -259,23 +276,19 @@ function looksAggregated(sql) {
   const s = sql.toLowerCase();
   return /count\(|sum\(|avg\(|min\(|max\(|group by/i.test(s);
 }
-
 function hasLimit(sql) {
   return /\slimit\s+\d+/i.test(sql);
 }
-
 function enforceLimit(sql, limit = 50) {
   if (looksAggregated(sql) || hasLimit(sql)) return sql;
   return `${sql} LIMIT ${limit}`;
 }
-
 function toCountQuery(sql) {
   const noLimit = sql.replace(/\slimit\s+\d+/i, "").trim();
   return `SELECT COUNT(*) AS total_rows FROM (${noLimit}) t`;
 }
-
 function coerceBigIntRows(rows) {
-  return rows.map(row => {
+  return (rows || []).map(row => {
     const clean = {};
     for (const [k, v] of Object.entries(row)) {
       clean[k] = typeof v === "bigint" ? Number(v) : v;
@@ -297,11 +310,9 @@ const AUDIT_COLS = [
 function touchesPortal(sql) {
   return /\bPortaldaTransparencia\./i.test(sql);
 }
-
 function hasAllAuditCols(sql) {
   return AUDIT_COLS.every(c => new RegExp(`\\b${c}\\b`, "i").test(sql));
 }
-
 function extractAuditSample(rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const r = rows.find(x => x && Object.keys(x).some(k => k.startsWith("_audit_"))) || rows[0];
@@ -321,29 +332,17 @@ const MODEL_SQL = process.env.ANTHROPIC_MODEL_SQL || "claude-3-5-sonnet-20241022
 const MODEL_EXPLAIN = process.env.ANTHROPIC_MODEL_EXPLAIN || "claude-3-5-sonnet-20241022";
 
 async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
-  const baseSystem = 
-    "Você é especialista em SQL DuckDB para a base da Receita Federal. " +
-    "Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
-    "Use nomes completos (chat_rfb.main.empresas). " +
-    "Somente SELECT ou WITH ... SELECT. " +
-    "Sempre use json_extract_string para campos dentro de empresa/simples. " +
-    "Para arrays use [1] para principal ou len() para contar. " +
-    "Se for número use CAST(... AS DOUBLE/INTEGER). " +
-    "\n\n⚠️ REGRAS DE CONTAGEM:\n" +
-    "- Total empresas: COUNT(*)\n" +
-    "- Total estabelecimentos/sócios: SUM(len(estabelecimentos)) ou SUM(len(socios))\n" +
-    "- NUNCA COUNT(estabelecimentos) ou COUNT(socios) → ERRADO!\n" +
-    "\nExemplos corretos:\n" +
-    "SELECT json_extract_string(empresa, '$.razao_social') AS razao\n" +
-    "SELECT estabelecimentos[1].uf AS uf_principal\n" +
-    "SELECT SUM(len(socios)) AS total_socios\n";
+  const baseSystem =
+    "Você é especialista em SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
+    "Somente SELECT/CTE. Use nomes completos (catalog.schema.table). " +
+    "Se não for agregação, sempre inclua LIMIT. Evite SELECT *.";
 
   const auditRule = auditRequired
-    ? "Se usar PortaldaTransparencia, inclua OBRIGATORIAMENTE: " + AUDIT_COLS.join(", ") + "\n"
+    ? "Se usar PortaldaTransparencia, inclua OBRIGATORIAMENTE no SELECT: " + AUDIT_COLS.join(", ")
     : "";
 
   const canonicalHint =
-    "Use preferencialmente chat_rfb.main.empresas (backend traduz automaticamente).\n";
+    "RFB: use as tabelas canônicas chat_rfb.main.empresas e chat_rfb.main.empresas_chat (backend traduz para versionadas).\n";
 
   const llmSQL = await anthropic.messages.create({
     model: MODEL_SQL,
@@ -353,7 +352,10 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
     messages: [
       {
         role: "user",
-        content: `${schema}\n\nPERGUNTA DO USUÁRIO: "${userQuery}"\n\nGere SQL válida (somente SELECT/CTE). Se não for agregação, use LIMIT ${previewLimit}.`,
+        content:
+          `${schema}\n\n` +
+          `PERGUNTA DO USUÁRIO: "${userQuery}"\n\n` +
+          `Gere SQL válida (somente SELECT/CTE). Se não for agregação, use LIMIT ${previewLimit}.`,
       },
     ],
   });
@@ -368,8 +370,10 @@ app.post("/chat", async (req, res) => {
     const userQuery = (req.body?.query || "").trim();
     const wantTotal = Boolean(req.body?.include_total);
     let previewLimit = Number(req.body?.limit ?? DEFAULT_PREVIEW_LIMIT);
+
     if (!userQuery) return res.json({ error: "Query vazia" });
-    previewLimit = Math.min(Math.max(previewLimit, 1), MAX_PREVIEW_LIMIT);
+    if (!Number.isFinite(previewLimit) || previewLimit <= 0) previewLimit = DEFAULT_PREVIEW_LIMIT;
+    previewLimit = Math.min(previewLimit, MAX_PREVIEW_LIMIT);
 
     console.log("\n" + "=".repeat(60));
     console.log("❓ PERGUNTA:", userQuery);
@@ -380,9 +384,11 @@ app.post("/chat", async (req, res) => {
     console.log("🤖 Gerando SQL...");
     let rawSql = await generateSQL({ schema, userQuery, previewLimit, auditRequired: true });
     let sql = enforceLimit(cleanSQL(rawSql), previewLimit);
+
+    // ✅ aplica aliases canônicos -> versionados
     sql = applyTableAliases(sql);
 
-    // Auditoria obrigatória
+    // ✅ auditoria obrigatória no Portal
     if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
       console.log("⚠️ Faltou _audit_* no Portal → regenerando...");
       rawSql = await generateSQL({
@@ -392,14 +398,13 @@ app.post("/chat", async (req, res) => {
         auditRequired: true,
       });
       sql = applyTableAliases(enforceLimit(cleanSQL(rawSql), previewLimit));
-      if (!hasAllAuditCols(sql)) {
+      if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
         throw new Error("Consulta ao Portal exige colunas _audit_* no SELECT.");
       }
     }
 
     console.log("📝 SQL:", sql.slice(0, 220) + (sql.length > 220 ? "..." : ""));
 
-    // Preview
     console.log("⚡ Executando preview...");
     const previewRowsRaw = await queryMD(sql);
     const previewRows = coerceBigIntRows(previewRowsRaw);
@@ -408,7 +413,6 @@ app.post("/chat", async (req, res) => {
     const audit_sample = extractAuditSample(previewRows);
     const dataset_meta = detectDatasetMeta(sql);
 
-    // Total (opcional)
     let totalRows = null;
     if (wantTotal) {
       try {
@@ -421,7 +425,6 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // Explain em texto puro
     console.log("💬 Explicando resultado...");
     const llmExplain = await anthropic.messages.create({
       model: MODEL_EXPLAIN,
@@ -429,19 +432,18 @@ app.post("/chat", async (req, res) => {
       temperature: 0.4,
       system:
         "Você é assistente brasileiro de inteligência empresarial. " +
-        "Responda em TEXTO PURO, no máximo 6 linhas. " +
+        "Responda em TEXTO PURO (sem Markdown). No máximo 6 linhas. " +
         "Use separadores de milhar (1.234.567). " +
-        "Se houver _audit_*, mencione 'Rastreabilidade disponível'. " +
-        "Sugira no máximo 2 filtros úteis. " +
-        "Não invente dados.",
+        "Se houver _audit_*, diga: 'Rastreabilidade disponível (URL/arquivo/linha/hash)'. " +
+        "Sugira no máximo 2 filtros úteis. Não invente dados.",
       messages: [
         {
           role: "user",
           content:
             `Pergunta: "${userQuery}"\n\n` +
             `SQL: ${sql}\n\n` +
-            (dataset_meta ? `Dataset: ${JSON.stringify(dataset_meta, null, 2)}\n\n` : "") +
-            (audit_sample ? `Audit: ${JSON.stringify(audit_sample, null, 2)}\n\n` : "") +
+            (dataset_meta ? `Dataset: ${JSON.stringify(dataset_meta)}\n\n` : "") +
+            (audit_sample ? `Audit: ${JSON.stringify(audit_sample)}\n\n` : "") +
             `Preview (primeiras 5 linhas):\n${JSON.stringify(previewRows.slice(0, 5), null, 2)}\n\n` +
             `Responda agora (texto puro):`,
         },
@@ -449,8 +451,8 @@ app.post("/chat", async (req, res) => {
     });
 
     const answer = llmExplain.content?.[0]?.text ?? "";
-
     const duration = Date.now() - startTime;
+
     console.log("✅ CONCLUÍDO em", duration, "ms");
 
     return res.json({
