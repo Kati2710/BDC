@@ -13,13 +13,33 @@ import Anthropic from "@anthropic-ai/sdk";
    - Retorno: preview + (opcional) total_rows
    - ✅ Auditoria obrigatória para PortaldaTransparencia.* (_audit_*)
    - ✅ audit_sample padronizado para o front
-   - ✅ dataset_meta (fonte + período Jan/2026 + origem oficial)
+   - ✅ dataset_meta (fonte + período Janeiro/2026 + origem oficial)
    - ✅ EXPLAIN em TEXTO PURO (sem Markdown)
+   - ✅ Aliases: chat_rfb.main.empresas -> chat_rfb.main.empresas_janeiro2026
+              chat_rfb.main.empresas_chat -> chat_rfb.main.empresas_chat_janeiro2026
 ============================================================ */
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+/* ========================= TABLE ALIASES (CANÔNICOS) =========================
+   O LLM pode usar "chat_rfb.main.empresas" (canônico), e o backend traduz
+   para a tabela versionada mais recente (ex.: empresas_janeiro2026).
+*/
+const TABLE_ALIASES = {
+  "chat_rfb.main.empresas": "chat_rfb.main.empresas_janeiro2026",
+  "chat_rfb.main.empresas_chat": "chat_rfb.main.empresas_chat_janeiro2026",
+};
+
+function applyTableAliases(sql) {
+  let s = sql;
+  for (const [from, to] of Object.entries(TABLE_ALIASES)) {
+    const rx = new RegExp(`\\b${from.replace(/\./g, "\\.")}\\b`, "gi");
+    s = s.replace(rx, to);
+  }
+  return s;
+}
 
 /* ========================= METADADOS DAS BASES ========================= */
 const DATASETS_META = {
@@ -46,17 +66,12 @@ const DATASETS_META = {
 
 function detectDatasetMeta(sql) {
   const s = (sql || "").toLowerCase();
-
-  // Receita Federal (Jan/2026)
   if (s.includes("empresas_janeiro2026") || s.includes("empresas_chat_janeiro2026")) {
     return DATASETS_META.receita_federal_janeiro2026;
   }
-
-  // Portal da Transparência
   if (s.includes("portaldatransparencia.")) {
     return DATASETS_META.portal_transparencia;
   }
-
   return null;
 }
 
@@ -82,7 +97,6 @@ let cacheExpiry = null;
 const CACHE_DURATION = 3600000;
 
 const ALLOWED_SCHEMA = "main";
-const ALLOWED_CATALOGS = ["chat_rfb", "PortaldaTransparencia"];
 
 async function getSchema() {
   if (cachedSchema && Date.now() < cacheExpiry) {
@@ -135,23 +149,31 @@ REGRAS CRÍTICAS PARA GERAR SQL:
    - NÃO use: PRAGMA / ATTACH / INSTALL / LOAD / COPY / EXPORT / CALL / SET
    - NÃO use read_* (read_csv/read_parquet/read_json/read_ndjson)
 
-2. CONTAGEM:
+2. TABELAS CANÔNICAS (IMPORTANTE):
+   - Para RFB, prefira estas tabelas CANÔNICAS:
+     • chat_rfb.main.empresas
+     • chat_rfb.main.empresas_chat
+   - O backend traduz automaticamente para as tabelas versionadas:
+     • chat_rfb.main.empresas_janeiro2026
+     • chat_rfb.main.empresas_chat_janeiro2026
+
+3. CONTAGEM:
    - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
    - Estabelecimentos: COUNT(*)
 
-3. FILTROS RFB:
+4. FILTROS RFB:
    - Ativas: WHERE situacao_cadastral = 'ATIVA'
    - Por UF: WHERE uf = 'SP'
    - MEI: WHERE opcao_mei = 'S'
    - Simples: WHERE opcao_simples = 'S'
 
-4. JOIN COMPLIANCE:
+5. JOIN COMPLIANCE:
    - CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR) = CAST(e.cnpj AS VARCHAR)
 
-5. COLUNAS COM ESPAÇOS:
-   - SEMPRE use aspas duplas: "NOME DO SANCIONADO"
+6. COLUNAS COM ESPAÇOS:
+   - Sempre use aspas duplas
 
-6. AUDITORIA (Portal da Transparência):
+7. AUDITORIA (Portal da Transparência):
    - Se consultar PortaldaTransparencia, inclua no SELECT:
      _audit_url_download,
      _audit_data_disponibilizacao_gov,
@@ -160,7 +182,7 @@ REGRAS CRÍTICAS PARA GERAR SQL:
      _audit_linha_csv,
      _audit_row_hash
 
-7. PERFORMANCE:
+8. PERFORMANCE:
    - Se NÃO for agregação, sempre use LIMIT.
    - Evite SELECT *.
 `;
@@ -314,7 +336,6 @@ const MAX_PREVIEW_LIMIT = 200;
 const MODEL_SQL = process.env.ANTHROPIC_MODEL_SQL || "claude-sonnet-4-5-20250929";
 const MODEL_EXPLAIN = process.env.ANTHROPIC_MODEL_EXPLAIN || "claude-sonnet-4-5-20250929";
 
-/* ========================= SQL GENERATION (com retry) ========================= */
 async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
   const baseSystem =
     "Você é especialista SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
@@ -331,6 +352,12 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
       )
     : "";
 
+  const canonicalHint =
+    "IMPORTANTE (RFB): use preferencialmente as tabelas canônicas:\n" +
+    "- chat_rfb.main.empresas\n" +
+    "- chat_rfb.main.empresas_chat\n" +
+    "O backend traduz para as tabelas versionadas automaticamente.\n";
+
   const llmSQL = await anthropic.messages.create({
     model: MODEL_SQL,
     max_tokens: 700,
@@ -340,7 +367,7 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
       {
         role: "user",
         content:
-          `${schema}\n\n` +
+          `${schema}\n\n${canonicalHint}\n` +
           `PERGUNTA DO USUÁRIO: "${userQuery}"\n\n` +
           `Gere a SQL (somente SELECT/CTE). Se não for agregação, use LIMIT ${previewLimit}.`,
       },
@@ -376,6 +403,9 @@ app.post("/chat", async (req, res) => {
 
     let sql = enforceLimit(cleanSQL(rawSql), previewLimit);
 
+    // ✅ aplica alias canônico -> versionado
+    sql = applyTableAliases(sql);
+
     // ✅ Auditoria obrigatória para Portal
     if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
       console.log("⚠️  SQL tocou Portal mas faltou _audit_* → regenerando...");
@@ -385,7 +415,7 @@ app.post("/chat", async (req, res) => {
         previewLimit,
         auditRequired: true,
       });
-      sql = enforceLimit(cleanSQL(rawSql), previewLimit);
+      sql = applyTableAliases(enforceLimit(cleanSQL(rawSql), previewLimit));
 
       if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
         throw new Error("SQL inválida: consulta ao Portal exige colunas _audit_* no SELECT (auditoria obrigatória).");
@@ -484,6 +514,7 @@ app.get("/health", (_, res) => {
     motherduck_token: MD_TOKEN ? "configured" : "missing",
     anthropic_key: process.env.ANTHROPIC_API_KEY ? "configured" : "missing",
     models: { sql: MODEL_SQL, explain: MODEL_EXPLAIN },
+    canonical_tables: TABLE_ALIASES,
   });
 });
 
@@ -504,5 +535,6 @@ app.listen(PORT, () => {
   console.log(`🔐 MotherDuck: ${MD_TOKEN ? "✅ Configurado" : "❌ Faltando"}`);
   console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✅ Configurado" : "❌ Faltando"}`);
   console.log(`🧠 Models: SQL=${MODEL_SQL} | EXPLAIN=${MODEL_EXPLAIN}`);
+  console.log("🧩 Canonical tables:", TABLE_ALIASES);
   console.log("");
 });
