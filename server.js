@@ -16,7 +16,7 @@ import Anthropic from "@anthropic-ai/sdk";
    - ✅ dataset_meta (fonte + período Janeiro/2026 + origem oficial)
    - ✅ EXPLAIN em TEXTO PURO (sem Markdown)
    - ✅ Aliases: chat_rfb.main.empresas -> chat_rfb.main.empresas_janeiro2026
-              chat_rfb.main.empresas_chat -> chat_rfb.main.empresas_chat_janeiro2026
+   - ✅ CONTAGEM CORRETA DE ARRAYS (estabelecimentos, socios)
 ============================================================ */
 
 const app = express();
@@ -157,23 +157,60 @@ REGRAS CRÍTICAS PARA GERAR SQL:
      • chat_rfb.main.empresas_janeiro2026
      • chat_rfb.main.empresas_chat_janeiro2026
 
-3. CONTAGEM:
-   - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
-   - Estabelecimentos: COUNT(*)
+3. CONTAGEM (CRÍTICO - ARRAYS):
+   
+   ⚠️ EMPRESAS (não é array):
+      • Total de registros: COUNT(*)
+      • CNPJs únicos: COUNT(DISTINCT cnpj_basico)
+      • Exemplo: SELECT COUNT(*) AS total_empresas FROM empresas
+   
+   ⚠️ ESTABELECIMENTOS (É UM ARRAY!):
+      • CORRETO: SUM(len(estabelecimentos))
+      • ERRADO: COUNT(estabelecimentos) ❌
+      • Exemplo: SELECT SUM(len(estabelecimentos)) AS total_estabelecimentos FROM empresas
+   
+   ⚠️ SÓCIOS (É UM ARRAY!):
+      • CORRETO: SUM(len(socios))
+      • ERRADO: COUNT(socios) ❌
+      • Exemplo: SELECT SUM(len(socios)) AS total_socios FROM empresas
+   
+   ⚠️ CNAES SECUNDÁRIOS (É UM ARRAY!):
+      • CORRETO: SUM(len(cnaes_secundarios_codigos))
+      • Exemplo: SELECT SUM(len(cnaes_secundarios_codigos)) AS total_cnaes FROM empresas
+   
+   📊 CONSULTA COMPLETA (recomendada):
+      SELECT 
+        COUNT(*) AS total_empresas,
+        SUM(len(estabelecimentos)) AS total_estabelecimentos,
+        SUM(len(socios)) AS total_socios
+      FROM empresas
+   
+   📊 MÉDIAS:
+      • Média de estabelecimentos por empresa:
+        SELECT AVG(len(estabelecimentos)) AS media FROM empresas
+      • Média de sócios por empresa:
+        SELECT AVG(len(socios)) AS media FROM empresas
 
 4. FILTROS RFB:
    - Ativas: WHERE situacao_cadastral = 'ATIVA'
    - Por UF: WHERE uf = 'SP'
    - MEI: WHERE opcao_mei = 'S'
    - Simples: WHERE opcao_simples = 'S'
+   - Microempresa: WHERE porte = 'MICRO EMPRESA'
 
-5. JOIN COMPLIANCE:
-   - CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR) = CAST(e.cnpj AS VARCHAR)
+5. NAVEGAÇÃO EM ARRAYS (estabelecimentos, socios):
+   - Primeiro estabelecimento: estabelecimentos[1]
+   - Primeira CNAE secundária: cnaes_secundarios_codigos[1]
+   - Exemplo: SELECT estabelecimentos[1].municipio, estabelecimentos[1].uf FROM empresas
 
-6. COLUNAS COM ESPAÇOS:
-   - Sempre use aspas duplas
+6. JOIN COMPLIANCE:
+   - Entre RFB e Portal da Transparência:
+     CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR) = CAST(e.cnpj_basico AS VARCHAR)
 
-7. AUDITORIA (Portal da Transparência):
+7. COLUNAS COM ESPAÇOS:
+   - Sempre use aspas duplas: "CPF OU CNPJ DO SANCIONADO"
+
+8. AUDITORIA (Portal da Transparência):
    - Se consultar PortaldaTransparencia, inclua no SELECT:
      _audit_url_download,
      _audit_data_disponibilizacao_gov,
@@ -182,9 +219,10 @@ REGRAS CRÍTICAS PARA GERAR SQL:
      _audit_linha_csv,
      _audit_row_hash
 
-8. PERFORMANCE:
-   - Se NÃO for agregação, sempre use LIMIT.
-   - Evite SELECT *.
+9. PERFORMANCE:
+   - Se NÃO for agregação, sempre use LIMIT
+   - Evite SELECT *
+   - Use índices de array quando possível: estabelecimentos[1] ao invés de UNNEST
 `;
 
   cachedSchema = schema;
@@ -342,7 +380,19 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
     "Use nomes completos (catalog.schema.table). " +
     "Somente SELECT/CTE. " +
     "Se não for agregação, sempre inclua LIMIT. " +
-    "Evite SELECT *.";
+    "Evite SELECT *. " +
+    "\n\n" +
+    "⚠️ CRÍTICO - CONTAGEM DE ARRAYS:\n" +
+    "- estabelecimentos é um ARRAY → use SUM(len(estabelecimentos))\n" +
+    "- socios é um ARRAY → use SUM(len(socios))\n" +
+    "- NUNCA use COUNT(estabelecimentos) ou COUNT(socios) - está ERRADO!\n" +
+    "\n" +
+    "EXEMPLOS:\n" +
+    "❌ ERRADO: SELECT COUNT(estabelecimentos) FROM empresas\n" +
+    "✅ CORRETO: SELECT SUM(len(estabelecimentos)) FROM empresas\n" +
+    "\n" +
+    "❌ ERRADO: SELECT COUNT(socios) FROM empresas\n" +
+    "✅ CORRETO: SELECT SUM(len(socios)) FROM empresas\n";
 
   const auditRule = auditRequired
     ? (
