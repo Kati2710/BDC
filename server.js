@@ -1,34 +1,25 @@
+ // server.js
 import express from "express";
 import cors from "cors";
 import duckdb from "duckdb";
 import Anthropic from "@anthropic-ai/sdk";
 
 /* ============================================================
-   CHAT-RFB API (MotherDuck + Claude) — FIX DEFINITIVO
-   ✅ Token no connection string (?motherduck_token=...)
-   ✅ dbinstance_inactivity_ttl=0s (evita cache problemático)
-   ✅ UMA conexão conn aberta e reutilizada (sem connect/close por query)
-   ✅ Aliases canônicos -> versionados (janeiro2026)
-   ✅ Auditoria obrigatória PortaldaTransparencia (_audit_*)
-   ✅ dataset_meta e audit_sample
-   ✅ Explain em TEXTO PURO (sem markdown)
+   CHAT-RFB API (MotherDuck + Claude) — BDC
+   ✅ Conexão MotherDuck PERSISTENTE (não fecha por query)
+   ✅ Auto-reconnect se cair
+   ✅ Cache do schema (1h)
+   ✅ Somente SELECT/CTE (seguro) + bloqueios regex
+   ✅ LIMIT automático quando não for agregação
+   ✅ Aliases: empresas -> empresas_janeiro2026
+   ✅ Auditoria obrigatória em PortaldaTransparencia + audit_sample
+   ✅ dataset_meta (fonte + período)
+   ✅ Explain SEM Markdown (texto puro)
 ============================================================ */
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
-
-/* ========================= CONFIG ========================= */
-const PORT = process.env.PORT || 10000;
-const MD_TOKEN = (process.env.MOTHERDUCK_TOKEN || "").trim();
-const MD_DBNAME = "chat_rfb"; // seu md:chat_rfb
-
-const MODEL_SQL = process.env.ANTHROPIC_MODEL_SQL || "claude-3-5-sonnet-20241022";
-const MODEL_EXPLAIN = process.env.ANTHROPIC_MODEL_EXPLAIN || "claude-3-5-sonnet-20241022";
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-const DEFAULT_PREVIEW_LIMIT = 50;
-const MAX_PREVIEW_LIMIT = 200;
 
 /* ========================= TABLE ALIASES ========================= */
 const TABLE_ALIASES = {
@@ -45,7 +36,7 @@ function applyTableAliases(sql) {
   return s;
 }
 
-/* ========================= DATASET META ========================= */
+/* ========================= METADADOS DAS BASES ========================= */
 const DATASETS_META = {
   receita_federal_janeiro2026: {
     id: "receita_federal_cnpj_janeiro2026",
@@ -53,7 +44,7 @@ const DATASETS_META = {
     base: "Cadastro Nacional da Pessoa Jurídica (CNPJ)",
     periodo: "Janeiro/2026",
     origem_url: "https://arquivos.receitafederal.gov.br",
-    tabelas_match: [
+    tabelas: [
       "chat_rfb.main.empresas_janeiro2026",
       "chat_rfb.main.empresas_chat_janeiro2026",
     ],
@@ -62,55 +53,111 @@ const DATASETS_META = {
     id: "portal_transparencia_sancoes",
     fonte: "Portal da Transparência — CGU",
     base: "Sanções e Acordos Administrativos",
-    periodicidade: "Atualização contínua",
+    periodicidade: "Atualização contínua (ex: a cada 4 horas em Sanções)",
     origem_url: "https://portaldatransparencia.gov.br",
-    tabelas_match: ["PortaldaTransparencia.main."],
+    tabelas_prefixo: "PortaldaTransparencia.main.",
   },
 };
 
 function detectDatasetMeta(sql) {
   const s = (sql || "").toLowerCase();
-  if (s.includes("empresas_janeiro2026") || s.includes("empresas_chat_janeiro2026")) {
+
+  if (s.includes("chat_rfb.main.empresas_janeiro2026") || s.includes("chat_rfb.main.empresas_chat_janeiro2026")) {
     return DATASETS_META.receita_federal_janeiro2026;
   }
-  if (s.includes("portaldatransparencia.")) {
+  if (s.includes("portaldatransparencia.main.")) {
     return DATASETS_META.portal_transparencia;
   }
   return null;
 }
 
-/* ========================= MOTHERDUCK (FIX) ========================= */
-// 🔥 FIX: token na connection string + desliga cache de instância
-// Isso evita o erro "Connection was never established or has been closed already"
-const mdPath = `md:${MD_DBNAME}?dbinstance_inactivity_ttl=0s&motherduck_token=${encodeURIComponent(MD_TOKEN)}`;
+/* ========================= MOTHERDUCK (PERSISTENTE) ========================= */
+const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
 
-// ✅ 1 Database, ✅ 1 Connection reutilizada
-const db = new duckdb.Database(mdPath);
-const conn = db.connect();
+// Dica: dbinstance_inactivity_ttl=0s ajuda a evitar estados ruins no cache.
+const MD_DB = "md:chat_rfb?dbinstance_inactivity_ttl=0s";
 
-function queryMD(sql) {
-  return new Promise((resolve, reject) => {
-    conn.all(sql, (err, rows) => {
+const db = new duckdb.Database(MD_DB, {
+  motherduck_token: MD_TOKEN,
+});
+
+// Conexão global reutilizada
+let mdConn = null;
+
+// fila simples para serializar queries (evita concorrência em cima do mesmo conn)
+let mdQueue = Promise.resolve();
+
+function isConnError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return (
+    msg.includes("connection was never established") ||
+    msg.includes("has been closed already") ||
+    msg.includes("connection error") ||
+    msg.includes("socket") ||
+    msg.includes("timeout")
+  );
+}
+
+async function ensureConn() {
+  if (mdConn) return mdConn;
+
+  mdConn = db.connect();
+  // teste rápido para garantir que está viva
+  await new Promise((resolve, reject) => {
+    mdConn.all("SELECT 1 AS ok", (err) => {
       if (err) return reject(err);
-      resolve(rows || []);
+      resolve(true);
     });
   });
+
+  return mdConn;
 }
 
-function coerceBigIntRows(rows) {
-  return (rows || []).map((row) => {
-    const clean = {};
-    for (const [k, v] of Object.entries(row)) {
-      clean[k] = typeof v === "bigint" ? Number(v) : v;
+async function reconnectConn() {
+  try {
+    if (mdConn) {
+      // em geral NÃO fechamos sempre, mas ao reconectar, fechamos a quebrada
+      mdConn.close();
     }
-    return clean;
-  });
+  } catch {}
+  mdConn = null;
+  return ensureConn();
 }
 
-/* ========================= SCHEMA CACHE ========================= */
+function queryMD(sql) {
+  // serializa para evitar duas reqs simultâneas no mesmo conn
+  mdQueue = mdQueue.then(async () => {
+    try {
+      const conn = await ensureConn();
+      return await new Promise((resolve, reject) => {
+        conn.all(sql, (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows);
+        });
+      });
+    } catch (err) {
+      if (isConnError(err)) {
+        // tenta 1 reconexão
+        const conn = await reconnectConn();
+        return await new Promise((resolve, reject) => {
+          conn.all(sql, (e2, rows2) => {
+            if (e2) return reject(e2);
+            resolve(rows2);
+          });
+        });
+      }
+      throw err;
+    }
+  });
+
+  return mdQueue;
+}
+
+/* ========================= SCHEMA COM CACHE ========================= */
 let cachedSchema = null;
 let cacheExpiry = null;
-const CACHE_DURATION = 3600000;
+const CACHE_DURATION = 3600000; // 1 hora
+
 const ALLOWED_SCHEMA = "main";
 
 async function getSchema() {
@@ -156,32 +203,55 @@ async function getSchema() {
 
   schema += `
 ═══════════════════════════════════════════════════════════════
-REGRAS CRÍTICAS PARA GERAR SQL:
+REGRAS CRÍTICAS PARA GERAR SQL (DuckDB):
 ═══════════════════════════════════════════════════════════════
-1) SOMENTE SELECT / WITH...SELECT (sem PRAGMA/ATTACH/INSTALL/LOAD/COPY/EXPORT/CALL/SET/read_*)
-2) RFB: use canônicas chat_rfb.main.empresas e chat_rfb.main.empresas_chat (backend traduz para *_janeiro2026)
-3) Contagem empresas únicas: COUNT(DISTINCT cnpj_basico)
-4) Filtros:
-   - Ativas: situacao_cadastral = 'ATIVA'
-   - UF: uf = 'SP'
-   - MEI: opcao_mei = 'S'
-   - Simples: opcao_simples = 'S'
-5) Portal: incluir SEMPRE no SELECT:
-   _audit_url_download, _audit_data_disponibilizacao_gov, _audit_periodicidade_atualizacao_gov,
-   _audit_arquivo_csv_origem, _audit_linha_csv, _audit_row_hash
-6) Performance: se NÃO for agregação, use LIMIT e evite SELECT *
+
+0) TABELAS CANÔNICAS (use estas no prompt; o backend converte para Janeiro/2026):
+   - chat_rfb.main.empresas  -> chat_rfb.main.empresas_janeiro2026
+   - chat_rfb.main.empresas_chat -> chat_rfb.main.empresas_chat_janeiro2026
+
+1) PERMISSÃO:
+   - Somente SELECT (ou WITH ... SELECT)
+   - NÃO use: PRAGMA / ATTACH / INSTALL / LOAD / COPY / EXPORT / CALL / SET
+   - NÃO use funções read_* (read_csv/read_parquet/read_json/read_ndjson)
+
+2) RFB — filtros comuns:
+   - Ativas: WHERE situacao_cadastral = 'ATIVA'
+   - Por UF: WHERE uf = 'SP'
+   - MEI: WHERE opcao_mei = 'S'
+   - Simples: WHERE opcao_simples = 'S'
+
+3) JOIN COMPLIANCE:
+   - CNPJ como string: CAST("CPF OU CNPJ DO SANCIONADO" AS VARCHAR)
+   - Comparar com: CAST(e.cnpj AS VARCHAR)
+
+4) COLUNAS COM ESPAÇOS:
+   - Sempre use aspas duplas: "NOME DO SANCIONADO"
+
+5) AUDITORIA (Portal da Transparência):
+   - Ao consultar PortaldaTransparencia.*, inclua SEMPRE:
+     _audit_url_download, _audit_data_disponibilizacao_gov, _audit_periodicidade_atualizacao_gov,
+     _audit_arquivo_csv_origem, _audit_linha_csv, _audit_row_hash
+
+6) PERFORMANCE:
+   - Se NÃO for agregação, use LIMIT (padrão 50)
+   - Evite SELECT * em tabelas grandes
 `;
 
   cachedSchema = schema;
   cacheExpiry = Date.now() + CACHE_DURATION;
   console.log("✅ Schema em cache por 1 hora\n");
+
   return schema;
 }
 
-/* ========================= SQL SAFETY ========================= */
+/* ========================= CLAUDE ========================= */
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 function stripFences(sql) {
   return sql.replace(/```sql|```/gi, "").trim();
 }
+
 function hasMultipleStatements(sql) {
   const s = sql.trim();
   const semiCount = (s.match(/;/g) || []).length;
@@ -189,6 +259,7 @@ function hasMultipleStatements(sql) {
   if (semiCount === 1 && s.endsWith(";")) return false;
   return true;
 }
+
 function isSelectLike(sql) {
   const s = sql.trim().toLowerCase();
   return s.startsWith("select") || s.startsWith("with");
@@ -196,10 +267,21 @@ function isSelectLike(sql) {
 
 const BLOCKED_SQL_PATTERNS = [
   /\b(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke)\b/i,
-  /\bpragma\b/i, /\battach\b/i, /\bdetach\b/i, /\binstall\b/i, /\bload\b/i,
-  /\bcopy\b/i, /\bexport\b/i, /\bcall\b/i, /\bset\b/i,
-  /\bcreate\s+secret\b/i, /\bsecret\b/i, /\bhttpfs\b/i,
-  /\bs3\b/i, /\bgcs\b/i, /\bazure\b/i,
+  /\bpragma\b/i,
+  /\battach\b/i,
+  /\bdetach\b/i,
+  /\binstall\b/i,
+  /\bload\b/i,
+  /\bcopy\b/i,
+  /\bexport\b/i,
+  /\bcall\b/i,
+  /\bset\b/i,
+  /\bcreate\s+secret\b/i,
+  /\bsecret\b/i,
+  /\bhttpfs\b/i,
+  /\bs3\b/i,
+  /\bgcs\b/i,
+  /\bazure\b/i,
   /\bread_(csv|parquet|json|ndjson)\b/i,
 ];
 
@@ -223,18 +305,32 @@ function cleanSQL(sqlRaw) {
 }
 
 function looksAggregated(sql) {
-  return /count\(|sum\(|avg\(|min\(|max\(|group by/i.test(sql.toLowerCase());
+  const s = sql.toLowerCase();
+  return /count\(|sum\(|avg\(|min\(|max\(|group by/i.test(s);
 }
+
 function hasLimit(sql) {
   return /\slimit\s+\d+/i.test(sql);
 }
-function enforceLimit(sql, limit) {
+
+function enforceLimit(sql, limit = 50) {
   if (looksAggregated(sql) || hasLimit(sql)) return sql;
   return `${sql} LIMIT ${limit}`;
 }
+
 function toCountQuery(sql) {
   const noLimit = sql.replace(/\slimit\s+\d+/i, "").trim();
   return `SELECT COUNT(*) AS total_rows FROM (${noLimit}) t`;
+}
+
+function coerceBigIntRows(rows) {
+  return rows.map((row) => {
+    const clean = {};
+    for (const [k, v] of Object.entries(row)) {
+      clean[k] = typeof v === "bigint" ? Number(v) : v;
+    }
+    return clean;
+  });
 }
 
 /* ========================= AUDIT ENFORCEMENT ========================= */
@@ -248,42 +344,51 @@ const AUDIT_COLS = [
 ];
 
 function touchesPortal(sql) {
-  return /\bPortaldaTransparencia\./i.test(sql);
+  return /\bPortaldaTransparencia\.main\./i.test(sql);
 }
+
 function hasAllAuditCols(sql) {
   return AUDIT_COLS.every((c) => new RegExp(`\\b${c}\\b`, "i").test(sql));
 }
+
 function extractAuditSample(rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
-  const r = rows.find((x) => x && Object.keys(x).some((k) => k.startsWith("_audit_"))) || rows[0];
+  const r =
+    rows.find((x) => x && Object.keys(x).some((k) => String(k).startsWith("_audit_"))) ||
+    rows[0];
+
   if (!r || typeof r !== "object") return null;
-  const hasAny = Object.keys(r).some((k) => k.startsWith("_audit_"));
+  const hasAny = Object.keys(r).some((k) => String(k).startsWith("_audit_"));
   if (!hasAny) return null;
+
   return AUDIT_COLS.reduce((acc, col) => {
     acc[col] = r[col] ?? null;
     return acc;
   }, {});
 }
 
-/* ========================= LLM SQL ========================= */
-async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
-  const baseSystem =
+/* ========================= CONFIG ========================= */
+const DEFAULT_PREVIEW_LIMIT = 50;
+const MAX_PREVIEW_LIMIT = 200;
+
+const MODEL_SQL = process.env.ANTHROPIC_MODEL_SQL || "claude-3-5-sonnet-20241022";
+const MODEL_EXPLAIN = process.env.ANTHROPIC_MODEL_EXPLAIN || "claude-3-5-sonnet-20241022";
+
+async function generateSQL({ schema, userQuery, previewLimit }) {
+  const system =
     "Você é especialista em SQL DuckDB. Gere APENAS a query SQL (sem explicações, sem markdown, sem comentários). " +
-    "Somente SELECT/CTE. Use nomes completos (catalog.schema.table). " +
-    "Se não for agregação, inclua LIMIT. Evite SELECT *.";
-
-  const auditRule = auditRequired
-    ? "Se usar PortaldaTransparencia, inclua OBRIGATORIAMENTE no SELECT: " + AUDIT_COLS.join(", ")
-    : "";
-
-  const canonicalHint =
-    "RFB: use canônicas chat_rfb.main.empresas e chat_rfb.main.empresas_chat (backend traduz para *_janeiro2026).";
+    "Somente SELECT ou WITH ... SELECT. Use nomes completos (catalog.schema.table). " +
+    "IMPORTANTE: use as tabelas canônicas chat_rfb.main.empresas e chat_rfb.main.empresas_chat (o backend converte para Janeiro/2026). " +
+    "Se a consulta usar PortaldaTransparencia, inclua OBRIGATORIAMENTE no SELECT: " +
+    AUDIT_COLS.join(", ") +
+    ". " +
+    "Se não for agregação, sempre inclua LIMIT.";
 
   const llmSQL = await anthropic.messages.create({
     model: MODEL_SQL,
     max_tokens: 700,
     temperature: 0,
-    system: `${baseSystem}\n${auditRule}\n${canonicalHint}`,
+    system,
     messages: [
       {
         role: "user",
@@ -297,7 +402,7 @@ async function generateSQL({ schema, userQuery, previewLimit, auditRequired }) {
   return llmSQL.content?.[0]?.text ?? "";
 }
 
-/* ========================= ROUTE /chat ========================= */
+/* ========================= ROTA PRINCIPAL ========================= */
 app.post("/chat", async (req, res) => {
   const startTime = Date.now();
 
@@ -316,37 +421,39 @@ app.post("/chat", async (req, res) => {
 
     const schema = await getSchema();
 
-    console.log("🤖 Gerando SQL...");
-    let rawSql = await generateSQL({ schema, userQuery, previewLimit, auditRequired: true });
+    // 1) SQL
+    let rawSql = await generateSQL({ schema, userQuery, previewLimit });
     let sql = enforceLimit(cleanSQL(rawSql), previewLimit);
 
-    // canonical -> versionado
+    // 2) aplica aliases (Janeiro/2026)
     sql = applyTableAliases(sql);
 
-    // Auditoria obrigatória
+    // 3) Se tocar Portal, garantir audit cols (se não tiver, tenta regenerar 1x)
     if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
-      console.log("⚠️ Faltou _audit_* no Portal → regenerando...");
+      console.log("⚠️ Faltou _audit_* no Portal → regenerando 1x...");
       rawSql = await generateSQL({
         schema,
         userQuery: userQuery + " (OBRIGATÓRIO: inclua TODAS as colunas _audit_*)",
         previewLimit,
-        auditRequired: true,
       });
       sql = applyTableAliases(enforceLimit(cleanSQL(rawSql), previewLimit));
-      if (touchesPortal(sql) && !hasAllAuditCols(sql)) {
+      if (!hasAllAuditCols(sql)) {
         throw new Error("Consulta ao Portal exige colunas _audit_* no SELECT.");
       }
     }
 
-    console.log("📝 SQL:", sql.slice(0, 220) + (sql.length > 220 ? "..." : ""));
+    console.log("📝 SQL:", sql.slice(0, 240) + (sql.length > 240 ? "..." : ""));
 
+    // 4) Preview
     console.log("⚡ Executando preview...");
     const previewRowsRaw = await queryMD(sql);
     const previewRows = coerceBigIntRows(previewRowsRaw);
+    console.log(`📊 Preview: ${previewRows.length} linha(s)`);
 
     const audit_sample = extractAuditSample(previewRows);
     const dataset_meta = detectDatasetMeta(sql);
 
+    // 5) Total opcional
     let totalRows = null;
     if (wantTotal) {
       try {
@@ -355,35 +462,37 @@ app.post("/chat", async (req, res) => {
         const total = totalRes?.[0]?.total_rows;
         totalRows = typeof total === "bigint" ? Number(total) : total ?? null;
       } catch (e) {
-        console.warn("COUNT falhou:", e.message);
+        console.warn("⚠️ COUNT falhou:", e.message);
       }
     }
 
+    // 6) Explain (texto puro, sem markdown)
     console.log("💬 Explicando resultado...");
     const llmExplain = await anthropic.messages.create({
       model: MODEL_EXPLAIN,
-      max_tokens: 300,
-      temperature: 0.4,
+      max_tokens: 260,
+      temperature: 0.35,
       system:
         "Você é assistente brasileiro de inteligência empresarial. " +
-        "Responda em TEXTO PURO (sem Markdown). No máximo 6 linhas. " +
-        "Use separadores de milhar (1.234.567). " +
-        "Se houver _audit_*, diga: 'Rastreabilidade disponível (URL/arquivo/linha/hash)'. " +
-        "Sugira no máximo 2 filtros úteis. Não invente dados.",
+        "Responda em TEXTO PURO (sem markdown, sem #, sem listas numeradas longas). " +
+        "No máximo 6 linhas. Use separadores de milhar (1.234.567). " +
+        "Se houver _audit_*, diga: 'Rastreabilidade disponível (URL, arquivo, linha e hash)'. " +
+        "Sugira no máximo 2 próximos filtros curtos.",
       messages: [
         {
           role: "user",
           content:
-            `Pergunta: "${userQuery}"\n\nSQL: ${sql}\n\n` +
-            (dataset_meta ? `Dataset: ${JSON.stringify(dataset_meta)}\n\n` : "") +
-            (audit_sample ? `Audit: ${JSON.stringify(audit_sample)}\n\n` : "") +
-            `Preview (primeiras 5 linhas):\n${JSON.stringify(previewRows.slice(0, 5), null, 2)}\n\n` +
-            `Responda agora (texto puro):`,
+            `Pergunta: "${userQuery}"\n` +
+            `SQL: ${sql}\n` +
+            (dataset_meta ? `Dataset: ${JSON.stringify(dataset_meta)}\n` : "") +
+            (audit_sample ? `Audit: ${JSON.stringify(audit_sample)}\n` : "") +
+            `Preview (até 5): ${JSON.stringify(previewRows.slice(0, 5))}\n` +
+            `Responda agora:`,
         },
       ],
     });
 
-    const answer = llmExplain.content?.[0]?.text ?? "";
+    const answer = (llmExplain.content?.[0]?.text ?? "").trim();
     const duration = Date.now() - startTime;
 
     return res.json({
@@ -407,26 +516,24 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-/* ========================= HEALTH ========================= */
+/* ========================= HEALTH / CACHE ========================= */
 app.get("/health", async (_, res) => {
   try {
-    // ping simples no MotherDuck
-    const ping = await queryMD("SELECT 1 AS ok");
+    await ensureConn();
     res.json({
       ok: true,
-      ping: ping?.[0]?.ok ?? null,
       timestamp: new Date().toISOString(),
       cache: cachedSchema ? "active" : "empty",
       motherduck_token: MD_TOKEN ? "configured" : "missing",
       anthropic_key: process.env.ANTHROPIC_API_KEY ? "configured" : "missing",
       models: { sql: MODEL_SQL, explain: MODEL_EXPLAIN },
       canonical_tables: TABLE_ALIASES,
+      dataset_receita_federal: DATASETS_META.receita_federal_janeiro2026,
     });
   } catch (e) {
     res.status(500).json({
       ok: false,
       error: String(e?.message || e),
-      timestamp: new Date().toISOString(),
     });
   }
 });
@@ -439,13 +546,22 @@ app.post("/clear-cache", (_, res) => {
 });
 
 /* ========================= START ========================= */
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, async () => {
   console.log("╔════════════════════════════════════════╗");
-  console.log("║     CHAT-RFB API RODANDO (FIX MD)      ║");
+  console.log("║     CHAT-RFB API RODANDO (BDC)        ║");
   console.log("╚════════════════════════════════════════╝");
   console.log(`📡 Porta: ${PORT}`);
   console.log(`🔐 MotherDuck token: ${MD_TOKEN ? "✅" : "❌"}`);
-  console.log(`🧠 MotherDuck path: md:${MD_DBNAME}?dbinstance_inactivity_ttl=0s&motherduck_token=***`);
-  console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✅" : "❌"}`);
+  console.log(`🤖 Claude key: ${process.env.ANTHROPIC_API_KEY ? "✅" : "❌"}`);
   console.log(`🧠 Models: ${MODEL_SQL} / ${MODEL_EXPLAIN}`);
+  console.log(`🧷 Aliases:`, TABLE_ALIASES);
+  console.log("");
+
+  try {
+    await ensureConn();
+    console.log("🟢 MotherDuck: conexão OK (persistente)");
+  } catch (e) {
+    console.log("🔴 MotherDuck: falhou ao conectar no start:", e.message);
+  }
 });
