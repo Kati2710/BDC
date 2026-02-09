@@ -1,26 +1,31 @@
 import express from "express";
 import cors from "cors";
-import duckdb from "duckdb";
 import Anthropic from "@anthropic-ai/sdk";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ========================= MOTHERDUCK ========================= */
-const MD_DB = "md:chat_rfb";
-const MD_TOKEN = process.env.MOTHERDUCK_TOKEN || "";
-const db = new duckdb.Database(MD_DB, { motherduck_token: MD_TOKEN });
+/* ========================= HETZNER SQL API ========================= */
+const HETZNER_SQL_URL = process.env.HETZNER_SQL_URL || "";
+const HETZNER_SQL_KEY = process.env.HETZNER_SQL_KEY || "";
 
-function queryMD(sql) {
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
-    conn.all(sql, (err, rows) => {
-      conn.close();
-      if (err) return reject(err);
-      resolve(rows);
-    });
+if (!HETZNER_SQL_URL) console.warn("❌ Faltando HETZNER_SQL_URL");
+if (!HETZNER_SQL_KEY) console.warn("❌ Faltando HETZNER_SQL_KEY");
+
+async function queryHetzner(sql) {
+  const r = await fetch(HETZNER_SQL_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": HETZNER_SQL_KEY,
+    },
+    body: JSON.stringify({ sql }),
   });
+
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data?.error || `Hetzner SQL API erro HTTP ${r.status}`);
+  return data.rows || [];
 }
 
 /* ========================= SCHEMA COM CACHE ========================= */
@@ -29,102 +34,56 @@ let cacheExpiry = null;
 const CACHE_DURATION = 3600000; // 1 hora
 
 async function getSchema() {
-  // Retorna cache se válido
   if (cachedSchema && Date.now() < cacheExpiry) {
     console.log("📦 Schema em CACHE");
     return cachedSchema;
   }
 
-  console.log("🔄 Buscando schema do MotherDuck...");
-  
-  // FILTRA só tabelas relevantes (não pega sample_data)
-  const allTables = await queryMD(`
-    SELECT table_catalog, table_schema, table_name
+  console.log("🔄 Buscando schema do Hetzner...");
+
+  // Aqui você tem 2 opções:
+  // (A) Se você mantiver INFORMATION_SCHEMA disponível no lado Hetzner (duckdb), use isso:
+  const allTables = await queryHetzner(`
+    SELECT table_schema, table_name
     FROM information_schema.tables
-    WHERE table_catalog IN ('chat_rfb', 'PortaldaTransparencia')
-      AND table_schema = 'main'
-    ORDER BY table_catalog, table_name
+    WHERE table_schema='main'
+    ORDER BY table_name
   `);
-  
-  console.log(`📋 Encontradas ${allTables.length} tabelas relevantes`);
-  
+
   let schema = "TABELAS E COLUNAS DISPONÍVEIS:\n\n";
-  
-  for (const table of allTables) {
-    const fullName = `${table.table_catalog}.${table.table_schema}.${table.table_name}`;
-    
-    console.log(`  ├─ ${fullName}`);
-    
-    const columns = await queryMD(`
-      SELECT column_name, data_type 
+
+  for (const t of allTables) {
+    const fullName = `${t.table_schema}.${t.table_name}`;
+    const columns = await queryHetzner(`
+      SELECT column_name, data_type
       FROM information_schema.columns
-      WHERE table_catalog = '${table.table_catalog}'
-        AND table_schema = '${table.table_schema}'
-        AND table_name = '${table.table_name}'
+      WHERE table_schema='${t.table_schema}'
+        AND table_name='${t.table_name}'
       ORDER BY ordinal_position
     `);
-    
+
     schema += `TABELA: ${fullName}\n`;
     schema += `Colunas (${columns.length}):\n`;
-    
-    for (const col of columns) {
-      schema += `  • ${col.column_name} (${col.data_type})\n`;
-    }
+    for (const col of columns) schema += `  • ${col.column_name} (${col.data_type})\n`;
     schema += "\n";
   }
-  
-  // ADICIONA REGRAS PRO CLAUDE
+
+  // suas regras do Claude continuam iguais:
   schema += `
 ═══════════════════════════════════════════════════════════════
 REGRAS CRÍTICAS PARA GERAR SQL:
 ═══════════════════════════════════════════════════════════════
-
 1. CONTAGEM:
    - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
    - Estabelecimentos: COUNT(*)
-
-2. FILTROS COMUNS:
-   - Ativas: WHERE situacao_cadastral = 'ATIVA'
-   - Por estado: WHERE uf = 'SP'
-   - MEI: WHERE opcao_mei = 'S'
-   - Simples: WHERE opcao_simples = 'S'
-
-3. JOIN COMPLIANCE (CEIS/CNEP + RFB):
-   - Limpe CNPJ antes de comparar:
-     REPLACE(REPLACE(REPLACE(ceis."CPF OU CNPJ DO SANCIONADO", '.', ''), '-', ''), '/', '')
-   - Ou use cnpj_basico se for só os 8 primeiros dígitos
-
-4. COLUNAS COM ESPAÇOS:
-   - SEMPRE use aspas duplas: "NOME DO SANCIONADO"
-
-5. PERFORMANCE:
-   - SEMPRE use LIMIT se não for agregação (COUNT, SUM, etc)
+2. PERFORMANCE:
+   - SEMPRE use LIMIT se não for agregação
    - Limite padrão: 50 linhas
-
-6. TECNOLOGIA (CNAEs sem hífen):
-   - 6201501, 6201502, 6202300, 6203100, 6204000, 6209100
-
-EXEMPLOS DE QUERIES:
-
--- Empresas ativas de SP com sanções:
-SELECT e.razao_social, e.uf, c."CATEGORIA DA SANÇÃO"
-FROM chat_rfb.main.empresas e
-INNER JOIN PortaldaTransparencia.main._ceis_corrigido c
-  ON REPLACE(REPLACE(REPLACE(c."CPF OU CNPJ DO SANCIONADO", '.', ''), '-', ''), '/', '') = e.cnpj
-WHERE e.situacao_cadastral = 'ATIVA' AND e.uf = 'SP'
-LIMIT 50;
-
--- Quantas empresas únicas de tecnologia:
-SELECT COUNT(DISTINCT cnpj_basico)
-FROM chat_rfb.main.empresas
-WHERE cnae_fiscal IN ('6201501','6201502','6202300');
 `;
 
-  // Salva no cache
   cachedSchema = schema;
   cacheExpiry = Date.now() + CACHE_DURATION;
   console.log("✅ Schema em cache por 1 hora\n");
-  
   return schema;
 }
 
@@ -141,122 +100,68 @@ function cleanSQL(sql) {
 /* ========================= ROTA ========================= */
 app.post("/chat", async (req, res) => {
   const startTime = Date.now();
-  
   try {
     const query = req.body?.query?.trim();
     if (!query) return res.json({ error: "Query vazia" });
 
-    console.log("\n" + "=".repeat(60));
-    console.log("❓ PERGUNTA:", query);
-    console.log("=".repeat(60));
-
-    // 1. Pega schema (cache se disponível)
     const schema = await getSchema();
 
-    // 2. Claude gera SQL
-    console.log("🤖 Claude gerando SQL...");
     const llmSQL = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 500,
       temperature: 0,
       system: "Você é especialista SQL DuckDB. Gere APENAS a query SQL, sem explicações. Use nomes completos de tabelas.",
-      messages: [{ 
-        role: "user", 
-        content: `${schema}\n\nPERGUNTA DO USUÁRIO: "${query}"\n\nGere a SQL:` 
+      messages: [{
+        role: "user",
+        content: `${schema}\n\nPERGUNTA DO USUÁRIO: "${query}"\n\nGere a SQL:`
       }]
     });
 
     const sql = cleanSQL(llmSQL.content[0].text);
-    console.log("📝 SQL gerada:", sql.slice(0, 150) + (sql.length > 150 ? "..." : ""));
 
-    // 3. Executa no MotherDuck
-    console.log("⚡ Executando no MotherDuck...");
-    const rows = await queryMD(sql);
-    console.log(`📊 Retornou: ${rows.length} linha(s)`);
+    // Executa no Hetzner (no lugar do MotherDuck)
+    const rows = await queryHetzner(sql);
 
-    // Converte BigInt para JSON
     const data = rows.map(row => {
       const clean = {};
       for (const [k, v] of Object.entries(row)) {
-        clean[k] = typeof v === 'bigint' ? Number(v) : v;
+        clean[k] = typeof v === "bigint" ? Number(v) : v;
       }
       return clean;
     });
 
-    // 4. Claude explica
-    console.log("💬 Claude explicando resultado...");
     const llmExplain = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 400,
       temperature: 0.7,
       system: "Você é assistente brasileiro. Seja claro, objetivo e use separadores de milhar (ex: 1.234.567).",
-      messages: [{ 
-        role: "user", 
-        content: `Pergunta: "${query}"\n\nSQL executada:\n${sql}\n\nResultado (primeiras 5 linhas):\n${JSON.stringify(data.slice(0, 5), null, 2)}\n\nExplique o resultado em português de forma clara e objetiva:` 
+      messages: [{
+        role: "user",
+        content: `Pergunta: "${query}"\n\nSQL executada:\n${sql}\n\nResultado (primeiras 5 linhas):\n${JSON.stringify(data.slice(0, 5), null, 2)}\n\nExplique o resultado em português:`
       }]
     });
 
     const answer = llmExplain.content[0].text;
-    const duration = Date.now() - startTime;
-    
-    console.log("✅ CONCLUÍDO em", duration, "ms");
-    console.log("📤 Resposta:", answer.slice(0, 100) + "...\n");
-
-    return res.json({ 
-      answer, 
-      sql, 
-      rows: data,
-      row_count: data.length,
-      duration_ms: duration
-    });
+    return res.json({ answer, sql, rows: data, row_count: data.length, duration_ms: Date.now() - startTime });
 
   } catch (err) {
-    const duration = Date.now() - startTime;
-    console.error("❌ ERRO:", err.message);
-    return res.status(500).json({ 
-      error: err.message,
-      duration_ms: duration
-    });
+    return res.status(500).json({ error: err.message, duration_ms: Date.now() - startTime });
   }
 });
 
 app.get("/health", (_, res) => {
-  res.json({ 
-    ok: true, 
+  res.json({
+    ok: true,
     timestamp: new Date().toISOString(),
-    cache: cachedSchema ? "active" : "empty"
+    cache: cachedSchema ? "active" : "empty",
+    hetzner_url: !!HETZNER_SQL_URL
   });
 });
 
-/* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("╔════════════════════════════════════════╗");
-  console.log("║   🚀 CHAT-RFB API RODANDO             ║");
-  console.log("╚════════════════════════════════════════╝");
+  console.log("🚀 CHAT-RFB API RODANDO");
   console.log(`📡 Porta: ${PORT}`);
-  console.log(`🔐 MotherDuck: ${MD_TOKEN ? "✅ Configurado" : "❌ Faltando"}`);
+  console.log(`🔐 Hetzner SQL API: ${HETZNER_SQL_URL ? "✅ Configurado" : "❌ Faltando"}`);
   console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✅ Configurado" : "❌ Faltando"}`);
-  console.log("");
 });
-```
-
----
-
-**O QUE MUDOU:**
-
-✅ **Cache de 1 hora** - Schema só é buscado 1x por hora  
-✅ **Filtra tabelas** - Só chat_rfb e PortaldaTransparencia (3 tabelas ao invés de 20)  
-✅ **Regras no schema** - Claude vê exemplos de queries  
-✅ **Logs melhores** - Mais visual e informativo  
-✅ **Performance** - Medição de tempo de resposta  
-
-**RESULTADO ESPERADO:**
-```
-📦 Schema em CACHE  <-- Instantâneo nas próximas requests!
-🤖 Claude gerando SQL...
-📝 SQL gerada: SELECT COUNT(DISTINCT cnpj_basico)...
-⚡ Executando no MotherDuck...
-📊 Retornou: 1 linha(s)
-💬 Claude explicando resultado...
-✅ CONCLUÍDO em 3500 ms
