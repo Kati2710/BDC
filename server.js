@@ -1,18 +1,29 @@
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ========================= HETZNER SQL API ========================= */
+// Serve arquivos estáticos (HTML)
+app.use(express.static(__dirname));
+
+/* ========================= CONFIGURAÇÃO ========================= */
 const HETZNER_SQL_URL = process.env.HETZNER_SQL_URL || "";
 const HETZNER_SQL_KEY = process.env.HETZNER_SQL_KEY || "";
+const QDRANT_URL = process.env.QDRANT_URL || "http://89.167.48.3:6333";
+const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || "rfb_catalog";
 
 if (!HETZNER_SQL_URL) console.warn("❌ Faltando HETZNER_SQL_URL");
 if (!HETZNER_SQL_KEY) console.warn("❌ Faltando HETZNER_SQL_KEY");
 
+/* ========================= HETZNER SQL ========================= */
 async function queryHetzner(sql) {
   const r = await fetch(HETZNER_SQL_URL, {
     method: "POST",
@@ -28,21 +39,72 @@ async function queryHetzner(sql) {
   return data.rows || [];
 }
 
-/* ========================= SCHEMA COM CACHE ========================= */
+/* ========================= RAG - QDRANT ========================= */
+async function searchRAG(query, top_k = 3) {
+  try {
+    const scrollUrl = `${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/scroll`;
+    
+    const r = await fetch(scrollUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        limit: 100,
+        with_payload: true,
+        with_vector: false
+      })
+    });
+
+    if (!r.ok) {
+      console.warn(`⚠️  Qdrant erro: ${r.status}`);
+      return [];
+    }
+
+    const data = await r.json();
+    const points = data.result?.points || [];
+
+    // Filtra por keywords
+    const queryLower = query.toLowerCase();
+    const keywords = queryLower.split(/\s+/).filter(w => w.length > 2);
+    
+    const scored = points.map(point => {
+      const text = (point.payload?.text || "").toLowerCase();
+      const score = keywords.reduce((sum, kw) => {
+        const count = (text.match(new RegExp(kw, "g")) || []).length;
+        return sum + count;
+      }, 0);
+      
+      return { score, point };
+    });
+
+    return scored
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, top_k)
+      .map(x => ({
+        text: x.point.payload.text,
+        metadata: x.point.payload.metadata || {},
+        score: x.score
+      }));
+
+  } catch (err) {
+    console.warn(`⚠️  RAG offline: ${err.message}`);
+    return [];
+  }
+}
+
+/* ========================= SCHEMA COM CACHE + RAG ========================= */
 let cachedSchema = null;
 let cacheExpiry = null;
 const CACHE_DURATION = 3600000; // 1 hora
 
-async function getSchema() {
-  if (cachedSchema && Date.now() < cacheExpiry) {
+async function getSchema(userQuery = "") {
+  if (cachedSchema && Date.now() < cacheExpiry && !userQuery) {
     console.log("📦 Schema em CACHE");
     return cachedSchema;
   }
 
   console.log("🔄 Buscando schema do Hetzner...");
 
-  // Aqui você tem 2 opções:
-  // (A) Se você mantiver INFORMATION_SCHEMA disponível no lado Hetzner (duckdb), use isso:
   const allTables = await queryHetzner(`
     SELECT table_schema, table_name
     FROM information_schema.tables
@@ -68,22 +130,44 @@ async function getSchema() {
     schema += "\n";
   }
 
-  // suas regras do Claude continuam iguais:
+  // ADICIONA CONTEXTO DO RAG
+  if (userQuery) {
+    console.log(`🔍 Buscando contexto RAG para: "${userQuery}"`);
+    const ragResults = await searchRAG(userQuery, 3);
+    
+    if (ragResults.length > 0) {
+      schema += "\n" + "═".repeat(70) + "\n";
+      schema += "📚 CONTEXTO RELEVANTE (RAG):\n";
+      schema += "═".repeat(70) + "\n";
+      
+      ragResults.forEach((result, i) => {
+        schema += `\n[${i+1}] ${result.text}\n`;
+      });
+      
+      console.log(`✅ Adicionados ${ragResults.length} contextos do RAG`);
+    }
+  }
+
   schema += `
-═══════════════════════════════════════════════════════════════
+${"═".repeat(70)}
 REGRAS CRÍTICAS PARA GERAR SQL:
-═══════════════════════════════════════════════════════════════
+${"═".repeat(70)}
 1. CONTAGEM:
    - Empresas ÚNICAS: COUNT(DISTINCT cnpj_basico)
    - Estabelecimentos: COUNT(*)
 2. PERFORMANCE:
    - SEMPRE use LIMIT se não for agregação
    - Limite padrão: 50 linhas
+3. CONTEXTO RAG:
+   - USE o contexto acima para entender melhor os dados
 `;
 
-  cachedSchema = schema;
-  cacheExpiry = Date.now() + CACHE_DURATION;
-  console.log("✅ Schema em cache por 1 hora\n");
+  if (!userQuery) {
+    cachedSchema = schema;
+    cacheExpiry = Date.now() + CACHE_DURATION;
+    console.log("✅ Schema em cache por 1 hora\n");
+  }
+  
   return schema;
 }
 
@@ -97,20 +181,24 @@ function cleanSQL(sql) {
   return s;
 }
 
-/* ========================= ROTA ========================= */
+/* ========================= ROTAS ========================= */
+
+// Chat principal
 app.post("/chat", async (req, res) => {
   const startTime = Date.now();
   try {
     const query = req.body?.query?.trim();
     if (!query) return res.json({ error: "Query vazia" });
 
-    const schema = await getSchema();
+    console.log(`\n💬 Query: "${query}"`);
+
+    const schema = await getSchema(query);
 
     const llmSQL = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 500,
       temperature: 0,
-      system: "Você é especialista SQL DuckDB. Gere APENAS a query SQL, sem explicações. Use nomes completos de tabelas.",
+      system: "Você é especialista SQL DuckDB. Gere APENAS a query SQL, sem explicações. Use nomes completos de tabelas. USE O CONTEXTO RAG.",
       messages: [{
         role: "user",
         content: `${schema}\n\nPERGUNTA DO USUÁRIO: "${query}"\n\nGere a SQL:`
@@ -118,8 +206,8 @@ app.post("/chat", async (req, res) => {
     });
 
     const sql = cleanSQL(llmSQL.content[0].text);
+    console.log(`📝 SQL: ${sql}`);
 
-    // Executa no Hetzner (no lugar do MotherDuck)
     const rows = await queryHetzner(sql);
 
     const data = rows.map(row => {
@@ -129,6 +217,8 @@ app.post("/chat", async (req, res) => {
       }
       return clean;
     });
+
+    console.log(`📊 Resultado: ${data.length} linhas`);
 
     const llmExplain = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
@@ -142,26 +232,67 @@ app.post("/chat", async (req, res) => {
     });
 
     const answer = llmExplain.content[0].text;
-    return res.json({ answer, sql, rows: data, row_count: data.length, duration_ms: Date.now() - startTime });
+    const duration = Date.now() - startTime;
+    
+    console.log(`✅ Resposta em ${duration}ms\n`);
+
+    return res.json({ 
+      answer, 
+      sql, 
+      rows: data, 
+      row_count: data.length, 
+      duration_ms: duration,
+      rag_enabled: true
+    });
 
   } catch (err) {
-    return res.status(500).json({ error: err.message, duration_ms: Date.now() - startTime });
+    console.error(`❌ Erro: ${err.message}`);
+    return res.status(500).json({ 
+      error: err.message, 
+      duration_ms: Date.now() - startTime 
+    });
   }
 });
 
-app.get("/health", (_, res) => {
+// Health check
+app.get("/health", async (_, res) => {
+  let qdrantStatus = "offline";
+  let qdrantCount = 0;
+  try {
+    const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}`);
+    if (r.ok) {
+      const data = await r.json();
+      qdrantStatus = "online";
+      qdrantCount = data.result?.vectors_count || 0;
+    }
+  } catch {}
+
   res.json({
     ok: true,
     timestamp: new Date().toISOString(),
     cache: cachedSchema ? "active" : "empty",
-    hetzner_url: !!HETZNER_SQL_URL
+    hetzner_sql: !!HETZNER_SQL_URL,
+    claude: !!process.env.ANTHROPIC_API_KEY,
+    rag: {
+      status: qdrantStatus,
+      url: QDRANT_URL,
+      collection: QDRANT_COLLECTION,
+      documents: qdrantCount
+    }
   });
 });
 
+/* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("🚀 CHAT-RFB API RODANDO");
+  console.log("\n" + "═".repeat(60));
+  console.log("🚀 CHAT-RFB API COM RAG!");
+  console.log("═".repeat(60));
   console.log(`📡 Porta: ${PORT}`);
-  console.log(`🔐 Hetzner SQL API: ${HETZNER_SQL_URL ? "✅ Configurado" : "❌ Faltando"}`);
-  console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✅ Configurado" : "❌ Faltando"}`);
+  console.log(`🔐 Hetzner SQL: ${HETZNER_SQL_URL ? "✅" : "❌"}`);
+  console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✅" : "❌"}`);
+  console.log(`📚 Qdrant: ${QDRANT_URL}`);
+  console.log(`📦 Collection: ${QDRANT_COLLECTION}`);
+  console.log("═".repeat(60));
+  console.log(`\n🌐 Acesse: http://localhost:${PORT}\n`);
 });
