@@ -13,7 +13,7 @@ app.use(express.json());
 app.use(express.static(__dirname));
 
 /* ========================= CONFIGURAÇÃO ========================= */
-const HETZNER_SQL_URL  = process.env.HETZNER_SQL_URL || "";
+const HETZNER_SQL_URL  = process.env.HETZNER_SQL_URL || "http://89.167.48.3:5002/sql";
 const HETZNER_SQL_KEY  = process.env.HETZNER_SQL_KEY || "";
 const PT_SQL_URL       = process.env.PT_SQL_URL || "http://89.167.48.3:5001";
 const PT_SQL_KEY       = process.env.PT_SQL_KEY || "bdc-pt-api-key-2026";
