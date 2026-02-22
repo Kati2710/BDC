@@ -216,10 +216,10 @@ SQL:
     messages: [{ role: "user", content: user }],
   });
 
-  let sql = cleanSQL(llm.content?.[0]?.text || "");
-  sql = fixUnnestAndBug(sql);
-  return sql;
-}
+  console.log("🔍 SQL do Claude:", llm.content?.[0]?.text);
+let sql = cleanSQL(llm.content?.[0]?.text || "");  // SÓ UMA VEZ!
+sql = fixUnnestAndBug(sql);
+return sql;
 
 async function runWithRetry(executorFn, ctx) {
   let sql = await claudeGenSQL(ctx);
