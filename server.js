@@ -20,8 +20,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 function cleanSQL(sql) {
   let s = String(sql || "").replace(/```sql|```/gi, "").trim().replace(/;+$/, "");
   if (!/\bselect\b/i.test(s)) throw new Error("SQL inválida (precisa SELECT)");
-  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load|read_csv|read_parquet|read_json|httpfs|exists)\b/i.test(s)) {
-    throw new Error("Operação bloqueada (apenas SELECT simples).");
+  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load|read_csv|read_parquet|read_json|httpfs)\b/i.test(s)) {
+    throw new Error("Operação bloqueada (apenas SELECT).");
   }
   if (s.includes(";")) throw new Error("SQL inválida (múltiplos comandos).");
   return s;
@@ -69,7 +69,7 @@ async function hetznerSchema({ kind, dataset, uf }) {
   }, 20000);
 
   if (!ok) throw new Error(data?.error || `Schema erro HTTP ${status}`);
-  return data.schema;
+  return data; // Retorna schema + sample + table_name
 }
 
 async function hetznerSQL({ kind, sql, dataset, uf, limit = 200 }) {
@@ -94,50 +94,38 @@ async function hetznerSQLAutoPT({ sql, dataset, limit = 200 }) {
   return data;
 }
 
-/* ========================= RAG ========================= */
-async function searchRAG(query, collection, top_k = 3) {
-  try {
-    const { ok, data } = await fetchJSON(
-      `${QDRANT_URL}/collections/${collection}/points/scroll`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ limit: 150, with_payload: true, with_vector: false }),
-      },
-      20000
-    );
-    if (!ok) return [];
-
-    const points = data.result?.points || [];
-    const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2).slice(0, 10);
-
-    return points
-      .map(p => {
-        const text = String(p.payload?.text || "").toLowerCase();
-        const score = keywords.reduce((s, kw) => s + (text.includes(kw) ? 1 : 0), 0);
-        return { score, text: p.payload?.text || "" };
-      })
-      .filter(x => x.score > 0)
-      .sort((a,b) => b.score - a.score)
-      .slice(0, top_k)
-      .map(x => x.text);
-  } catch {
-    return [];
+/* ========================= SCHEMA + SAMPLE TO TEXT ========================= */
+function schemaAndSampleToText(schemaData) {
+  if (!schemaData) return "Schema indisponível.";
+  
+  let text = "";
+  
+  // Nome da tabela
+  if (schemaData.table_name) {
+    text += `TABELA: ${schemaData.table_name}\n\n`;
   }
-}
-
-function schemaToText(schemaObj) {
-  if (!schemaObj) return "SCHEMA indisponível.";
-  if (schemaObj.columns && Array.isArray(schemaObj.columns)) {
-    let s = "COLUNAS:\n";
-    for (const c of schemaObj.columns) s += `- ${c.name} (${c.type})\n`;
-    return s;
+  
+  // Schema das colunas
+  if (schemaData.schema?.columns) {
+    text += "COLUNAS:\n";
+    for (const col of schemaData.schema.columns) {
+      text += `- ${col.name} (${col.type})\n`;
+    }
+    text += "\n";
   }
-  return JSON.stringify(schemaObj, null, 2);
+  
+  // SAMPLE (exemplos reais!)
+  if (schemaData.sample && schemaData.sample.length > 0) {
+    text += "EXEMPLOS DE DADOS (primeiras 2 linhas):\n";
+    text += JSON.stringify(schemaData.sample.slice(0, 2), null, 2);
+    text += "\n";
+  }
+  
+  return text;
 }
 
 /* ========================= CLAUDE DECISION ========================= */
-async function claudeDecideSource({ question, catalog, ragText = "" }) {
+async function claudeDecideSource({ question, catalog }) {
   const system = `
 Você é assistente inteligente de consulta de dados.
 
@@ -159,12 +147,7 @@ REGRAS:
    }
 `.trim();
 
-  const user = `
-${ragText ? `CONTEXTO RAG:\n${ragText}\n\n` : ""}
-PERGUNTA: "${question}"
-
-Qual fonte usar? Responda apenas JSON:
-`.trim();
+  const user = `PERGUNTA: "${question}"\n\nQual fonte usar? Responda apenas JSON:`;
 
   const llm = await anthropic.messages.create({
     model: "claude-sonnet-4-5-20250929",
@@ -179,37 +162,33 @@ Qual fonte usar? Responda apenas JSON:
   return JSON.parse(clean);
 }
 
-async function claudeGenSQL({ question, schemaText, ragText = "", rulesExtra = "", lastError = "" }) {
+async function claudeGenSQL({ question, schemaText, lastError = "" }) {
   const system = `
 Você é especialista em SQL DuckDB.
 
-REGRAS CRÍTICAS:
-- Responda APENAS com SQL puro, sem markdown, sem explicações
-- Apenas SELECT simples
-- Nunca use: read_parquet, read_csv, read_json, EXISTS, attach, detach
-- Nunca gere múltiplos comandos
-- Use SOMENTE o schema fornecido
-- Para UNNEST: CROSS JOIN UNNEST(x) AS t(item) WHERE item.campo = '...'
-- NUNCA escreva AND logo após JOIN
+REGRAS DE SEGURANÇA:
+- Responda APENAS com SQL puro, sem markdown
+- Apenas SELECT
+- Nunca use: read_parquet, read_csv, attach, detach, httpfs
 
-${rulesExtra}
+IMPORTANTE:
+- Use SOMENTE o schema e exemplos fornecidos
+- Aprenda com os EXEMPLOS DE DADOS para entender a estrutura
+- Para arrays nested, veja os exemplos de como acessar
 `.trim();
 
   const user = `
-SCHEMA:
 ${schemaText}
-
-${ragText ? `CONTEXTO RAG:\n${ragText}\n` : ""}
 
 PERGUNTA: "${question}"
 ${lastError ? `\nERRO NA ÚLTIMA TENTATIVA:\n${lastError}\nCorrija a SQL.` : ""}
 
-SQL:
+Gere SQL baseada nos exemplos acima:
 `.trim();
 
   const llm = await anthropic.messages.create({
     model: "claude-sonnet-4-5-20250929",
-    max_tokens: 650,
+    max_tokens: 800,
     temperature: 0,
     system,
     messages: [{ role: "user", content: user }],
@@ -245,42 +224,18 @@ app.post("/chat", async (req, res) => {
     const catalog = await hetznerCatalog();
 
     // 2. Claude decide qual fonte usar
-    const rag = await searchRAG(query, QDRANT_COLLECTION, 3);
-    const ragText = rag.length ? rag.map((t, i) => `[${i+1}] ${t}`).join("\n") : "";
+    const decision = await claudeDecideSource({ question: query, catalog });
 
-    const decision = await claudeDecideSource({ question: query, catalog, ragText });
+    // 3. Busca schema + sample da fonte escolhida
+    const schemaData = await hetznerSchema(decision);
+    const schemaText = schemaAndSampleToText(schemaData);
 
-    // 3. Busca schema da fonte escolhida
-    const schemaObj = await hetznerSchema(decision);
-    const schemaText = schemaToText(schemaObj);
-
-    // 4. Claude gera SQL
-    let rulesExtra = "";
-    if (decision.kind === "rfb") {
-      rulesExtra = `
-IMPORTANTE - TABELA RFB:
-- A tabela se chama "rfb" (não read_parquet, não s3://)
-- Estrutura: FROM rfb
-- CROSS JOIN UNNEST(rfb.estabelecimentos) AS t(estab)
-- O DuckDB já filtrou pela UF ${decision.uf}
-- NÃO use filtro uf='${decision.uf}'
-- Para empresas únicas: COUNT(DISTINCT rfb.cnpj_basico)
-- Situação cadastral ativa: estab.situacao_cadastral = 'Ativa'
-`;
-    } else {
-      rulesExtra = `
-IMPORTANTE - TABELA PT:
-- A tabela se chama "data"
-- FROM data
-- Use aspas duplas para colunas com espaços
-`;
-    }
-
+    // 4. Claude gera SQL (aprende sozinho com os exemplos!)
     const executorFn = decision.kind === "rfb"
       ? (sql) => hetznerSQL({ kind: "rfb", sql, uf: decision.uf, limit: 200 })
       : (sql) => hetznerSQLAutoPT({ sql, dataset: decision.dataset, limit: 200 });
 
-    const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText, ragText, rulesExtra });
+    const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText });
 
     return res.json({
       answer: `✅ Consulta executada (${decision.kind === "rfb" ? `UF ${decision.uf}` : decision.dataset}).`,
@@ -320,7 +275,7 @@ app.get("/health", async (_, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
-  console.log("🚀 BrazilDataCorp API — RFB + PT (Decisão Inteligente)");
+  console.log("🚀 BrazilDataCorp API — Schema + Sample Learning");
   console.log("═".repeat(60));
   console.log(`📡 Porta: ${PORT}`);
   console.log(`🧱 Hetzner API: ${HETZNER_API_BASE}`);
