@@ -20,8 +20,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 function cleanSQL(sql) {
   let s = String(sql || "").replace(/```sql|```/gi, "").trim().replace(/;+$/, "");
   if (!/\bselect\b/i.test(s)) throw new Error("SQL inválida (precisa SELECT)");
-  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load|read_csv|read_parquet)\b/i.test(s)) {
-    throw new Error("Operação bloqueada (apenas SELECT).");
+  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load|read_csv|read_parquet|read_json|httpfs|exists)\b/i.test(s)) {
+    throw new Error("Operação bloqueada (apenas SELECT simples).");
   }
   if (s.includes(";")) throw new Error("SQL inválida (múltiplos comandos).");
   return s;
@@ -183,15 +183,14 @@ async function claudeGenSQL({ question, schemaText, ragText = "", rulesExtra = "
   const system = `
 Você é especialista em SQL DuckDB.
 
-REGRAS:
-- Responda APENAS com SQL puro, sem markdown.
-- Apenas SELECT.
-- Nunca gere múltiplos comandos.
-- Use SOMENTE o schema fornecido.
-- Se usar UNNEST:
-  CROSS JOIN UNNEST(x) AS t(item)
-  WHERE item.campo = '...'
-- NUNCA escreva AND logo após JOIN.
+REGRAS CRÍTICAS:
+- Responda APENAS com SQL puro, sem markdown, sem explicações
+- Apenas SELECT simples
+- Nunca use: read_parquet, read_csv, read_json, EXISTS, attach, detach
+- Nunca gere múltiplos comandos
+- Use SOMENTE o schema fornecido
+- Para UNNEST: CROSS JOIN UNNEST(x) AS t(item) WHERE item.campo = '...'
+- NUNCA escreva AND logo após JOIN
 
 ${rulesExtra}
 `.trim();
@@ -259,12 +258,22 @@ app.post("/chat", async (req, res) => {
     let rulesExtra = "";
     if (decision.kind === "rfb") {
       rulesExtra = `
-IMPORTANTE:
-- O DuckDB já corresponde à UF ${decision.uf}. NÃO use filtro uf='${decision.uf}'.
-- Para empresas únicas use COUNT(DISTINCT cnpj_basico).
+IMPORTANTE - TABELA RFB:
+- A tabela se chama "rfb" (não read_parquet, não s3://)
+- Estrutura: FROM rfb
+- CROSS JOIN UNNEST(rfb.estabelecimentos) AS t(estab)
+- O DuckDB já filtrou pela UF ${decision.uf}
+- NÃO use filtro uf='${decision.uf}'
+- Para empresas únicas: COUNT(DISTINCT rfb.cnpj_basico)
+- Situação cadastral ativa: estab.situacao_cadastral = 'Ativa'
 `;
     } else {
-      rulesExtra = `IMPORTANTE: a tabela principal se chama "data".`;
+      rulesExtra = `
+IMPORTANTE - TABELA PT:
+- A tabela se chama "data"
+- FROM data
+- Use aspas duplas para colunas com espaços
+`;
     }
 
     const executorFn = decision.kind === "rfb"
