@@ -8,7 +8,7 @@ app.use(express.json({ limit: "1mb" }));
 
 /* ========================= CONFIG ========================= */
 const HETZNER_API_BASE = process.env.HETZNER_API_BASE || "http://89.167.48.3:5010";
-const HETZNER_API_KEY  = process.env.HETZNER_API_KEY  || "bdc-sql-api-key-2026-segura";
+const HETZNER_API_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura";
 
 const QDRANT_URL = process.env.QDRANT_URL || "http://89.167.48.3:6333";
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || "rfb_catalog";
@@ -17,11 +17,6 @@ const PT_COLLECTION = process.env.PT_COLLECTION || "pt_catalog";
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 /* ========================= UTILS ========================= */
-function detectUF(q = "") {
-  const m = q.toUpperCase().match(/\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b/);
-  return m ? m[1] : null;
-}
-
 function cleanSQL(sql) {
   let s = String(sql || "").replace(/```sql|```/gi, "").trim().replace(/;+$/, "");
   if (!/\bselect\b/i.test(s)) throw new Error("SQL inválida (precisa SELECT)");
@@ -32,8 +27,6 @@ function cleanSQL(sql) {
   return s;
 }
 
-// Corrige o bug clássico do Claude:
-// CROSS JOIN UNNEST(...) AS e AND ...  ->  ... AS e WHERE ...
 function fixUnnestAndBug(sql) {
   return sql.replace(
     /(CROSS\s+JOIN\s+UNNEST\s*\([^)]*\)\s+AS\s+\w+)\s+AND\b/gi,
@@ -56,7 +49,15 @@ async function fetchJSON(url, opts = {}, timeoutMs = 30000) {
   }
 }
 
-/* ========================= HETZNER API (5010) ========================= */
+/* ========================= HETZNER API ========================= */
+async function hetznerCatalog() {
+  const { ok, status, data } = await fetchJSON(`${HETZNER_API_BASE}/catalog`, {
+    headers: { "X-API-Key": HETZNER_API_KEY },
+  }, 20000);
+  if (!ok) throw new Error(data?.error || `Catalog erro HTTP ${status}`);
+  return data;
+}
+
 async function hetznerSchema({ kind, dataset, uf }) {
   const qs = new URLSearchParams();
   qs.set("kind", kind);
@@ -93,7 +94,7 @@ async function hetznerSQLAutoPT({ sql, dataset, limit = 200 }) {
   return data;
 }
 
-/* ========================= RAG (simple) ========================= */
+/* ========================= RAG ========================= */
 async function searchRAG(query, collection, top_k = 3) {
   try {
     const { ok, data } = await fetchJSON(
@@ -127,16 +128,58 @@ async function searchRAG(query, collection, top_k = 3) {
 
 function schemaToText(schemaObj) {
   if (!schemaObj) return "SCHEMA indisponível.";
-  if (schemaObj.table && Array.isArray(schemaObj.columns)) {
-    let s = `TABELA PRINCIPAL: ${schemaObj.table}\nCOLUNAS:\n`;
+  if (schemaObj.columns && Array.isArray(schemaObj.columns)) {
+    let s = "COLUNAS:\n";
     for (const c of schemaObj.columns) s += `- ${c.name} (${c.type})\n`;
     return s;
   }
   return JSON.stringify(schemaObj, null, 2);
 }
 
-/* ========================= CLAUDE SQL GEN + RETRY ========================= */
-async function genSQL({ question, schemaText, ragText = "", rulesExtra = "", lastError = "" }) {
+/* ========================= CLAUDE DECISION ========================= */
+async function claudeDecideSource({ question, catalog, ragText = "" }) {
+  const system = `
+Você é assistente inteligente de consulta de dados.
+
+DATASETS DISPONÍVEIS:
+${JSON.stringify(catalog, null, 2)}
+
+REGRAS:
+1. Analise a pergunta do usuário
+2. Decida qual fonte usar:
+   - "rfb" para perguntas sobre empresas, CNPJ, estabelecimentos
+   - "pt" para Portal da Transparência (Bolsa Família, BPC, servidores, etc)
+3. Se RFB, escolha a UF (estados brasileiros)
+4. Se PT, escolha o dataset específico
+5. Responda APENAS com JSON:
+   {
+     "kind": "rfb" ou "pt",
+     "uf": "SP" (se kind=rfb),
+     "dataset": "BolsaFamilia_Pagamentos" (se kind=pt)
+   }
+`.trim();
+
+  const user = `
+${ragText ? `CONTEXTO RAG:\n${ragText}\n\n` : ""}
+PERGUNTA: "${question}"
+
+Qual fonte usar? Responda apenas JSON:
+`.trim();
+
+  const llm = await anthropic.messages.create({
+    model: "claude-sonnet-4-5-20250929",
+    max_tokens: 200,
+    temperature: 0,
+    system,
+    messages: [{ role: "user", content: user }],
+  });
+
+  const text = llm.content?.[0]?.text || "{}";
+  const clean = text.replace(/```json|```/g, "").trim();
+  return JSON.parse(clean);
+}
+
+async function claudeGenSQL({ question, schemaText, ragText = "", rulesExtra = "", lastError = "" }) {
   const system = `
 Você é especialista em SQL DuckDB.
 
@@ -179,13 +222,13 @@ SQL:
 }
 
 async function runWithRetry(executorFn, ctx) {
-  let sql = await genSQL(ctx);
+  let sql = await claudeGenSQL(ctx);
   try {
     const out = await executorFn(sql);
     return { sql, out };
   } catch (e1) {
     const errMsg = String(e1?.message || e1);
-    sql = await genSQL({ ...ctx, lastError: errMsg });
+    sql = await claudeGenSQL({ ...ctx, lastError: errMsg });
     const out = await executorFn(sql);
     return { sql, out };
   }
@@ -198,67 +241,44 @@ app.post("/chat", async (req, res) => {
     const query = (req.body?.query || "").trim();
     if (!query) return res.json({ error: "Query vazia" });
 
-    const uf = detectUF(query);
-    if (!uf) {
-      return res.status(400).json({ error: "Informe a UF na pergunta (ex: SP, MG, RJ). Seu RFB está separado por UF." });
-    }
+    // 1. Busca catálogo
+    const catalog = await hetznerCatalog();
 
-    const schemaObj = await hetznerSchema({ kind: "rfb", uf });
-    const schemaText = schemaToText(schemaObj);
-
+    // 2. Claude decide qual fonte usar
     const rag = await searchRAG(query, QDRANT_COLLECTION, 3);
     const ragText = rag.length ? rag.map((t, i) => `[${i+1}] ${t}`).join("\n") : "";
 
-    const rulesExtra = `
-IMPORTANTE:
-- O DuckDB já corresponde à UF ${uf}. NÃO use filtro uf='${uf}' (a menos que exista a coluna uf no schema).
-- Para empresas únicas use COUNT(DISTINCT cnpj_basico) quando aplicável.
-`;
+    const decision = await claudeDecideSource({ question: query, catalog, ragText });
 
-    const executorFn = (sql) => hetznerSQL({ kind: "rfb", sql, uf, limit: 200 });
-    const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText, ragText, rulesExtra });
-
-    return res.json({
-      answer: `✅ Consulta executada (UF ${uf}).`,
-      sql,
-      rows: out.rows || [],
-      row_count: out.row_count ?? (out.rows?.length || 0),
-      duration_ms: Date.now() - start,
-    });
-
-  } catch (err) {
-    return res.status(500).json({ error: err.message, duration_ms: Date.now() - start });
-  }
-});
-
-app.post("/chat/pt", async (req, res) => {
-  const start = Date.now();
-  try {
-    const query = (req.body?.query || "").trim();
-    const dataset = (req.body?.dataset || "").trim();
-    if (!query) return res.json({ error: "Query vazia" });
-    if (!dataset) return res.status(400).json({ error: "Escolha um dataset (ex: Acordos, BPC, BolsaFamilia_Pagamentos...)." });
-
-    const schemaObj = await hetznerSchema({ kind: "pt", dataset });
+    // 3. Busca schema da fonte escolhida
+    const schemaObj = await hetznerSchema(decision);
     const schemaText = schemaToText(schemaObj);
 
-    const rag = await searchRAG(query, PT_COLLECTION, 5);
-    const ragText = rag.length ? rag.map((t, i) => `[${i+1}] ${t}`).join("\n") : "";
+    // 4. Claude gera SQL
+    let rulesExtra = "";
+    if (decision.kind === "rfb") {
+      rulesExtra = `
+IMPORTANTE:
+- O DuckDB já corresponde à UF ${decision.uf}. NÃO use filtro uf='${decision.uf}'.
+- Para empresas únicas use COUNT(DISTINCT cnpj_basico).
+`;
+    } else {
+      rulesExtra = `IMPORTANTE: a tabela principal se chama "data".`;
+    }
 
-    const rulesExtra = `IMPORTANTE: a tabela principal se chama "data".`;
+    const executorFn = decision.kind === "rfb"
+      ? (sql) => hetznerSQL({ kind: "rfb", sql, uf: decision.uf, limit: 200 })
+      : (sql) => hetznerSQLAutoPT({ sql, dataset: decision.dataset, limit: 200 });
 
-    const executorFn = (sql) => hetznerSQLAutoPT({ sql, dataset, limit: 200 });
     const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText, ragText, rulesExtra });
 
     return res.json({
-      answer: `✅ Consulta executada no dataset ${dataset}.`,
+      answer: `✅ Consulta executada (${decision.kind === "rfb" ? `UF ${decision.uf}` : decision.dataset}).`,
       sql,
       rows: out.rows || [],
       row_count: out.row_count ?? (out.rows?.length || 0),
-      duckdbs_queried: out.duckdbs_queried || 0,
-      dataset,
+      source: decision,
       duration_ms: Date.now() - start,
-      rag_hits: rag.length,
     });
 
   } catch (err) {
@@ -290,7 +310,7 @@ app.get("/health", async (_, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
-  console.log("🚀 BrazilDataCorp API — RFB + PT (via Hetzner DuckDB API)");
+  console.log("🚀 BrazilDataCorp API — RFB + PT (Decisão Inteligente)");
   console.log("═".repeat(60));
   console.log(`📡 Porta: ${PORT}`);
   console.log(`🧱 Hetzner API: ${HETZNER_API_BASE}`);
