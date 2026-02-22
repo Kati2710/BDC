@@ -1,4 +1,3 @@
-// server.js (Render) — COMPLETO
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
@@ -26,14 +25,15 @@ function detectUF(q = "") {
 function cleanSQL(sql) {
   let s = String(sql || "").replace(/```sql|```/gi, "").trim().replace(/;+$/, "");
   if (!/\bselect\b/i.test(s)) throw new Error("SQL inválida (precisa SELECT)");
-  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load)\b/i.test(s)) {
+  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load|read_csv|read_parquet)\b/i.test(s)) {
     throw new Error("Operação bloqueada (apenas SELECT).");
   }
   if (s.includes(";")) throw new Error("SQL inválida (múltiplos comandos).");
   return s;
 }
 
-// Corrige exatamente o bug: "CROSS JOIN UNNEST(...) AS e AND ..."
+// Corrige o bug clássico do Claude:
+// CROSS JOIN UNNEST(...) AS e AND ...  ->  ... AS e WHERE ...
 function fixUnnestAndBug(sql) {
   return sql.replace(
     /(CROSS\s+JOIN\s+UNNEST\s*\([^)]*\)\s+AS\s+\w+)\s+AND\b/gi,
@@ -56,7 +56,7 @@ async function fetchJSON(url, opts = {}, timeoutMs = 30000) {
   }
 }
 
-/* ========================= HETZNER API ========================= */
+/* ========================= HETZNER API (5010) ========================= */
 async function hetznerSchema({ kind, dataset, uf }) {
   const qs = new URLSearchParams();
   qs.set("kind", kind);
@@ -76,7 +76,7 @@ async function hetznerSQL({ kind, sql, dataset, uf, limit = 200 }) {
     method: "POST",
     headers: { "content-type": "application/json", "X-API-Key": HETZNER_API_KEY },
     body: JSON.stringify({ kind, sql, dataset, uf, limit }),
-  }, 60000);
+  }, 90000);
 
   if (!ok) throw new Error(data?.error || `SQL erro HTTP ${status}`);
   return data;
@@ -93,7 +93,7 @@ async function hetznerSQLAutoPT({ sql, dataset, limit = 200 }) {
   return data;
 }
 
-/* ========================= RAG (simples) ========================= */
+/* ========================= RAG (simple) ========================= */
 async function searchRAG(query, collection, top_k = 3) {
   try {
     const { ok, data } = await fetchJSON(
@@ -125,10 +125,7 @@ async function searchRAG(query, collection, top_k = 3) {
   }
 }
 
-/* ========================= CLAUDE SQL GEN + RETRY ========================= */
 function schemaToText(schemaObj) {
-  // schema pode vir como {table, columns:[{name,type}]} ou qualquer JSON
-  // aqui a gente “normaliza” em texto amigável pro Claude
   if (!schemaObj) return "SCHEMA indisponível.";
   if (schemaObj.table && Array.isArray(schemaObj.columns)) {
     let s = `TABELA PRINCIPAL: ${schemaObj.table}\nCOLUNAS:\n`;
@@ -138,20 +135,20 @@ function schemaToText(schemaObj) {
   return JSON.stringify(schemaObj, null, 2);
 }
 
+/* ========================= CLAUDE SQL GEN + RETRY ========================= */
 async function genSQL({ question, schemaText, ragText = "", rulesExtra = "", lastError = "" }) {
   const system = `
 Você é especialista em SQL DuckDB.
 
-REGRAS OBRIGATÓRIAS:
-- Responda APENAS com SQL puro (sem markdown, sem explicações).
-- Apenas SELECT. Nunca DDL/DML.
-- Nunca gere múltiplos comandos (sem ponto-e-vírgula no meio).
-- Use SOMENTE tabelas/colunas do SCHEMA.
-- Evite JOINs complexos; só use se necessário.
-- Se usar UNNEST, faça assim e filtre no WHERE:
+REGRAS:
+- Responda APENAS com SQL puro, sem markdown.
+- Apenas SELECT.
+- Nunca gere múltiplos comandos.
+- Use SOMENTE o schema fornecido.
+- Se usar UNNEST:
   CROSS JOIN UNNEST(x) AS t(item)
   WHERE item.campo = '...'
-- NUNCA escreva "AND" logo após um JOIN (isso quebra o parser).
+- NUNCA escreva AND logo após JOIN.
 
 ${rulesExtra}
 `.trim();
@@ -160,7 +157,7 @@ ${rulesExtra}
 SCHEMA:
 ${schemaText}
 
-${ragText ? `\nCONTEXTO RAG (se ajudar):\n${ragText}\n` : ""}
+${ragText ? `CONTEXTO RAG:\n${ragText}\n` : ""}
 
 PERGUNTA: "${question}"
 ${lastError ? `\nERRO NA ÚLTIMA TENTATIVA:\n${lastError}\nCorrija a SQL.` : ""}
@@ -181,16 +178,14 @@ SQL:
   return sql;
 }
 
-async function runWithRetry(executorFn, { question, schemaText, ragText, rulesExtra }) {
-  // tentativa 1
-  let sql = await genSQL({ question, schemaText, ragText, rulesExtra });
+async function runWithRetry(executorFn, ctx) {
+  let sql = await genSQL(ctx);
   try {
     const out = await executorFn(sql);
     return { sql, out };
   } catch (e1) {
-    // tentativa 2 (com erro)
     const errMsg = String(e1?.message || e1);
-    sql = await genSQL({ question, schemaText, ragText, rulesExtra, lastError: errMsg });
+    sql = await genSQL({ ...ctx, lastError: errMsg });
     const out = await executorFn(sql);
     return { sql, out };
   }
@@ -203,28 +198,24 @@ app.post("/chat", async (req, res) => {
     const query = (req.body?.query || "").trim();
     if (!query) return res.json({ error: "Query vazia" });
 
-    const uf = detectUF(query); // pode ser null
+    const uf = detectUF(query);
     if (!uf) {
       return res.status(400).json({ error: "Informe a UF na pergunta (ex: SP, MG, RJ). Seu RFB está separado por UF." });
     }
 
-    // schema RFB daquela UF
     const schemaObj = await hetznerSchema({ kind: "rfb", uf });
     const schemaText = schemaToText(schemaObj);
 
-    // RAG (opcional)
     const rag = await searchRAG(query, QDRANT_COLLECTION, 3);
     const ragText = rag.length ? rag.map((t, i) => `[${i+1}] ${t}`).join("\n") : "";
 
-    // regra extra: DB já é UF, então não usar uf='SP'
     const rulesExtra = `
 IMPORTANTE:
-- O DuckDB já corresponde à UF ${uf}. NÃO use filtro "uf='${uf}'" a menos que exista uma coluna chamada uf no schema (geralmente não existe).
+- O DuckDB já corresponde à UF ${uf}. NÃO use filtro uf='${uf}' (a menos que exista a coluna uf no schema).
 - Para empresas únicas use COUNT(DISTINCT cnpj_basico) quando aplicável.
 `;
 
     const executorFn = (sql) => hetznerSQL({ kind: "rfb", sql, uf, limit: 200 });
-
     const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText, ragText, rulesExtra });
 
     return res.json({
@@ -254,14 +245,9 @@ app.post("/chat/pt", async (req, res) => {
     const rag = await searchRAG(query, PT_COLLECTION, 5);
     const ragText = rag.length ? rag.map((t, i) => `[${i+1}] ${t}`).join("\n") : "";
 
-    const rulesExtra = `
-IMPORTANTE:
-- A tabela principal se chama "data".
-- Use LIMIT 50 como padrão quando listar linhas.
-`;
+    const rulesExtra = `IMPORTANTE: a tabela principal se chama "data".`;
 
     const executorFn = (sql) => hetznerSQLAutoPT({ sql, dataset, limit: 200 });
-
     const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText, ragText, rulesExtra });
 
     return res.json({
@@ -282,10 +268,12 @@ IMPORTANTE:
 
 app.get("/health", async (_, res) => {
   let hetznerOk = false, qdrantOk = false;
+
   try {
     const r = await fetch(`${HETZNER_API_BASE}/health`, { headers: { "X-API-Key": HETZNER_API_KEY } });
     hetznerOk = r.ok;
   } catch {}
+
   try {
     const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}`);
     qdrantOk = r.ok;
@@ -299,7 +287,6 @@ app.get("/health", async (_, res) => {
   });
 });
 
-/* ========================= START ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
