@@ -12,28 +12,6 @@ const HETZNER_API_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-seg
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-/* ========================= HELPERS ========================= */
-function normalize(text) {
-  return text
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove acentos
-    .replace(/[_\s-]/g, ""); // Remove espaços, underscores, hífens
-}
-
-function fuzzyMatchDataset(query, datasets) {
-  const queryNorm = normalize(query);
-  const matches = [];
-  
-  for (const ds of datasets) {
-    const dsNorm = normalize(ds);
-    if (dsNorm.includes(queryNorm) || queryNorm.includes(dsNorm)) {
-      matches.push(ds);
-    }
-  }
-  
-  return matches;
-}
-
 /* ========================= UTILS ========================= */
 async function fetchJSON(url, opts = {}, timeoutMs = 30000) {
   const controller = new AbortController();
@@ -53,22 +31,20 @@ async function fetchJSON(url, opts = {}, timeoutMs = 30000) {
 /* ========================= TOOLS ========================= */
 const tools = [
   {
-    name: "search_catalog",
-    description: "Busca datasets disponíveis. DICA: Use busca fuzzy - 'acordo' encontra 'Acordos', 'bolsa familia' encontra 'BolsaFamilia_Pagamentos'.",
+    name: "find_datasets_semantic",
+    description: "Busca os datasets mais relevantes usando IA semântica (embeddings). USE SEMPRE PRIMEIRO! Exemplo: 'acordo leniência' → encontra 'Acordos'",
     input_schema: {
       type: "object",
       properties: {
-        kind: { type: "string", enum: ["rfb", "pt"] },
-        uf: { type: "string" },
-        dataset: { type: "string" },
-        fuzzy_query: { type: "string", description: "Busca fuzzy por nome de dataset (ex: 'acordo', 'leniencia')" }
+        query: { type: "string", description: "Descrição do que procura (ex: 'acordo leniência', 'bolsa família', 'servidores')" },
+        top_k: { type: "number", default: 3, description: "Quantos datasets retornar (1-5)" }
       },
-      required: ["kind"]
+      required: ["query"]
     }
   },
   {
     name: "get_schema",
-    description: "Obtém schema + exemplos. Use para ver colunas disponíveis.",
+    description: "Obtém schema + exemplo de um dataset específico.",
     input_schema: {
       type: "object",
       properties: {
@@ -81,7 +57,7 @@ const tools = [
   },
   {
     name: "query_simple",
-    description: "Executa 1 query SQL. Limite 200 linhas.",
+    description: "Executa 1 query SQL.",
     input_schema: {
       type: "object",
       properties: {
@@ -95,7 +71,7 @@ const tools = [
   },
   {
     name: "query_multiple",
-    description: "Executa queries em PARALELO. Economiza tempo!",
+    description: "Executa múltiplas queries em PARALELO.",
     input_schema: {
       type: "object",
       properties: {
@@ -136,30 +112,17 @@ const tools = [
 async function executeTool(toolName, toolInput) {
   console.log(`🔧 ${toolName}:`, JSON.stringify(toolInput, null, 2));
   
-  if (toolName === "search_catalog") {
-    const qs = new URLSearchParams();
-    qs.set("kind", toolInput.kind);
-    if (toolInput.uf) qs.set("uf", toolInput.uf);
-    if (toolInput.dataset) qs.set("dataset", toolInput.dataset);
-    
-    const { ok, data } = await fetchJSON(`${HETZNER_API_BASE}/catalog/search?${qs}`, {
-      headers: { "X-API-Key": HETZNER_API_KEY }
+  if (toolName === "find_datasets_semantic") {
+    const { ok, data } = await fetchJSON(`${HETZNER_API_BASE}/search_semantic`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-API-Key": HETZNER_API_KEY },
+      body: JSON.stringify({
+        query: toolInput.query,
+        top_k: toolInput.top_k || 3
+      })
     });
     
-    if (!ok) return { error: "Falha ao buscar catálogo" };
-    
-    // Aplica busca fuzzy se fornecida
-    if (toolInput.fuzzy_query && data.results) {
-      const datasets = data.results.map(r => r.dataset).filter(Boolean);
-      const matches = fuzzyMatchDataset(toolInput.fuzzy_query, datasets);
-      return {
-        ...data,
-        fuzzy_matches: matches,
-        hint: matches.length > 0 ? `Datasets que combinam com '${toolInput.fuzzy_query}': ${matches.join(', ')}` : null
-      };
-    }
-    
-    return data;
+    return ok ? data : { error: "Busca semântica falhou" };
   }
   
   if (toolName === "get_schema") {
@@ -174,11 +137,10 @@ async function executeTool(toolName, toolInput) {
     
     if (!ok) return { error: "Schema não encontrado" };
     
-    // Retorna schema compacto
     return {
       dataset: toolInput.dataset || toolInput.uf,
       table_name: data.table_name,
-      columns: (data.schema?.columns || []).map(c => `${c.name} (${c.type})`).join(", "),
+      columns: (data.schema?.columns || []).slice(0, 15).map(c => `${c.name} (${c.type})`).join(", "),
       sample_row: data.sample?.[0] || null
     };
   }
@@ -257,42 +219,33 @@ async function executeTool(toolName, toolInput) {
 async function runAgent(userQuestion) {
   const messages = [{
     role: "user",
-    content: `PERGUNTA: "${userQuestion}"
-
-Responda em português com dados + fontes (use colunas _audit_*).`
+    content: `PERGUNTA: "${userQuestion}"`
   }];
   
-  const system = `Especialista em dados públicos brasileiros. SEJA DIRETO E RÁPIDO.
+  const system = `Especialista em dados públicos brasileiros. WORKFLOW OTIMIZADO:
 
-DATASETS PT (Portal da Transparência):
-- Acordos = Acordos de Leniência
-- BolsaFamilia_Pagamentos = Pagamentos Bolsa Família
-- CPGF = Cartão Corporativo
-- Convenios = Convênios
-- Servidores = Servidores públicos
-- (e outros 35+)
+PASSO 1 - IDENTIFICAR DATASET (SEMPRE):
+Use find_datasets_semantic("sua busca aqui")
+Exemplo: "acordo leniência" → retorna "Acordos" (score 0.81)
 
-ESTRATÉGIA INTELIGENTE:
-1. Identifique dataset pelo NOME (use fuzzy: "acordo" → "Acordos", "bolsa" → "BolsaFamilia_Pagamentos")
-2. get_schema UMA VEZ do dataset certo
-3. query_multiple para paralelizar (ex: Acordos + RFB ao mesmo tempo)
-4. cross_results se precisar cruzar
-5. RESPONDA (máx 5 iterações!)
+PASSO 2 - VER ESTRUTURA:
+get_schema do dataset encontrado
+
+PASSO 3 - QUERIES PARALELAS:
+query_multiple para buscar em vários lugares ao mesmo tempo
+
+PASSO 4 - CRUZAR SE NECESSÁRIO:
+cross_results para JOIN
+
+PASSO 5 - RESPONDER:
+Em português com dados + FONTES (colunas _audit_*)
 
 CNPJ:
-- PT datasets têm CNPJ completo (14 dígitos)
-- RFB tem cnpj_basico (8 primeiros dígitos)
-- Para cruzar: extraia primeiros 8 dígitos do CNPJ PT
+- PT: 14 dígitos (ex: "12345678000190")
+- RFB: 8 dígitos (cnpj_basico: "12345678")
+- Cruzar: LEFT(cnpj_pt, 8)
 
-NÃO faça:
-- Buscar texto em datasets errados
-- Múltiplas buscas no catálogo
-- Queries de exploração
-
-FAÇA:
-- Ir DIRETO no dataset certo
-- Incluir _audit_* sempre
-- Ser conciso`;
+MÁXIMO 5 ITERAÇÕES!`;
 
   let iterations = 0;
   const maxIterations = 5;
@@ -376,10 +329,10 @@ app.get("/health", async (_, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
-  console.log("🚀 BDC — AGENTE INTELIGENTE + FUZZY SEARCH");
+  console.log("🚀 BDC — BUSCA SEMÂNTICA ATIVA");
   console.log("═".repeat(60));
   console.log(`📡 Porta: ${PORT}`);
   console.log(`🧱 API: ${HETZNER_API_BASE}`);
-  console.log(`🎯 Máx iterações: 5 | Tokens: 1500`);
+  console.log(`🎯 Embeddings: intfloat/multilingual-e5-large`);
   console.log("═".repeat(60));
 });
