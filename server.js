@@ -44,13 +44,13 @@ const tools = [
   },
   {
     name: "get_schema",
-    description: "Obtém schema + exemplo de um dataset específico.",
+    description: "Obtém schema + exemplo. RFB: use 'uf' (ex: SP, MG). PT: use 'dataset' (ex: Acordos, BolsaFamilia_Pagamentos).",
     input_schema: {
       type: "object",
       properties: {
         kind: { type: "string", enum: ["rfb", "pt"] },
-        uf: { type: "string" },
-        dataset: { type: "string" }
+        uf: { type: "string", description: "Para RFB apenas (AC, AL, ..., TO)" },
+        dataset: { type: "string", description: "Para PT apenas (Acordos, BolsaFamilia_Pagamentos, etc)" }
       },
       required: ["kind"]
     }
@@ -128,8 +128,13 @@ async function executeTool(toolName, toolInput) {
   if (toolName === "get_schema") {
     const qs = new URLSearchParams();
     qs.set("kind", toolInput.kind);
-    if (toolInput.uf) qs.set("uf", toolInput.uf);
-    if (toolInput.dataset) qs.set("dataset", toolInput.dataset);
+    
+    // PT usa "dataset", RFB usa "uf"
+    if (toolInput.kind === "rfb" && toolInput.uf) {
+      qs.set("uf", toolInput.uf);
+    } else if (toolInput.kind === "pt" && toolInput.dataset) {
+      qs.set("dataset", toolInput.dataset);
+    }
     
     const { ok, data } = await fetchJSON(`${HETZNER_API_BASE}/schema?${qs}`, {
       headers: { "X-API-Key": HETZNER_API_KEY }
@@ -222,33 +227,30 @@ async function runAgent(userQuestion) {
     content: `PERGUNTA: "${userQuestion}"`
   }];
   
-  const system = `Especialista em dados públicos brasileiros. WORKFLOW OTIMIZADO:
+  const system = `Especialista em dados públicos. SEJA EFICIENTE:
 
-PASSO 1 - IDENTIFICAR DATASET (SEMPRE):
-Use find_datasets_semantic("sua busca aqui")
-Exemplo: "acordo leniência" → retorna "Acordos" (score 0.81)
+REGRAS:
+1. find_datasets_semantic UMA VEZ APENAS por pergunta
+2. get_schema: PT datasets NÃO usam "uf", só "dataset"
+3. RFB usa "uf", PT usa "dataset"
+4. SEMPRE inclua colunas _audit_* nas queries
 
-PASSO 2 - VER ESTRUTURA:
-get_schema do dataset encontrado
-
-PASSO 3 - QUERIES PARALELAS:
-query_multiple para buscar em vários lugares ao mesmo tempo
-
-PASSO 4 - CRUZAR SE NECESSÁRIO:
-cross_results para JOIN
-
-PASSO 5 - RESPONDER:
-Em português com dados + FONTES (colunas _audit_*)
+WORKFLOW:
+1. find_datasets_semantic("termos relevantes") → UMA VEZ
+2. get_schema(kind="pt", dataset="NomeDataset") 
+3. query_multiple (paralelo)
+4. cross_results se necessário
+5. RESPONDA com dados + fontes
 
 CNPJ:
-- PT: 14 dígitos (ex: "12345678000190")
-- RFB: 8 dígitos (cnpj_basico: "12345678")
-- Cruzar: LEFT(cnpj_pt, 8)
+- PT: 14 dígitos completos
+- RFB: 8 dígitos (cnpj_basico)
+- Cruzar: SUBSTRING("CNPJ DO SANCIONADO", 1, 8)
 
-MÁXIMO 5 ITERAÇÕES!`;
+Máximo 8 iterações.`;
 
   let iterations = 0;
-  const maxIterations = 5;
+  const maxIterations = 8;
   
   while (iterations < maxIterations) {
     iterations++;
