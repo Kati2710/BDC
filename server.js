@@ -10,30 +10,9 @@ app.use(express.json({ limit: "1mb" }));
 const HETZNER_API_BASE = process.env.HETZNER_API_BASE || "http://89.167.48.3:5010";
 const HETZNER_API_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura";
 
-const QDRANT_URL = process.env.QDRANT_URL || "http://89.167.48.3:6333";
-const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || "rfb_catalog";
-const PT_COLLECTION = process.env.PT_COLLECTION || "pt_catalog";
-
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 /* ========================= UTILS ========================= */
-function cleanSQL(sql) {
-  let s = String(sql || "").replace(/```sql|```/gi, "").trim().replace(/;+$/, "");
-  if (!/\bselect\b/i.test(s)) throw new Error("SQL inválida (precisa SELECT)");
-  if (/\b(insert|update|delete|drop|alter|create|truncate|attach|detach|pragma|copy|install|load|read_csv|read_parquet|read_json|httpfs)\b/i.test(s)) {
-    throw new Error("Operação bloqueada (apenas SELECT).");
-  }
-  if (s.includes(";")) throw new Error("SQL inválida (múltiplos comandos).");
-  return s;
-}
-
-function fixUnnestAndBug(sql) {
-  return sql.replace(
-    /(CROSS\s+JOIN\s+UNNEST\s*\([^)]*\)\s+AS\s+\w+)\s+AND\b/gi,
-    "$1 WHERE"
-  );
-}
-
 async function fetchJSON(url, opts = {}, timeoutMs = 30000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -49,168 +28,191 @@ async function fetchJSON(url, opts = {}, timeoutMs = 30000) {
   }
 }
 
-/* ========================= HETZNER API ========================= */
-async function hetznerCatalog() {
-  const { ok, status, data } = await fetchJSON(`${HETZNER_API_BASE}/catalog`, {
-    headers: { "X-API-Key": HETZNER_API_KEY },
-  }, 20000);
-  if (!ok) throw new Error(data?.error || `Catalog erro HTTP ${status}`);
-  return data;
-}
-
-async function hetznerSchema({ kind, dataset, uf }) {
-  const qs = new URLSearchParams();
-  qs.set("kind", kind);
-  if (dataset) qs.set("dataset", dataset);
-  if (uf) qs.set("uf", uf);
-
-  const { ok, status, data } = await fetchJSON(`${HETZNER_API_BASE}/schema?${qs.toString()}`, {
-    headers: { "X-API-Key": HETZNER_API_KEY },
-  }, 20000);
-
-  if (!ok) throw new Error(data?.error || `Schema erro HTTP ${status}`);
-  return data; // Retorna schema + sample + table_name
-}
-
-async function hetznerSQL({ kind, sql, dataset, uf, limit = 200 }) {
-  const { ok, status, data } = await fetchJSON(`${HETZNER_API_BASE}/sql`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "X-API-Key": HETZNER_API_KEY },
-    body: JSON.stringify({ kind, sql, dataset, uf, limit }),
-  }, 90000);
-
-  if (!ok) throw new Error(data?.error || `SQL erro HTTP ${status}`);
-  return data;
-}
-
-async function hetznerSQLAutoPT({ sql, dataset, limit = 200 }) {
-  const { ok, status, data } = await fetchJSON(`${HETZNER_API_BASE}/sql/auto`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "X-API-Key": HETZNER_API_KEY },
-    body: JSON.stringify({ sql, dataset, limit }),
-  }, 120000);
-
-  if (!ok) throw new Error(data?.error || `SQL auto erro HTTP ${status}`);
-  return data;
-}
-
-/* ========================= SCHEMA + SAMPLE TO TEXT ========================= */
-function schemaAndSampleToText(schemaData) {
-  if (!schemaData) return "Schema indisponível.";
-  
-  let text = "";
-  
-  // Nome da tabela
-  if (schemaData.table_name) {
-    text += `TABELA: ${schemaData.table_name}\n\n`;
-  }
-  
-  // Schema das colunas
-  if (schemaData.schema?.columns) {
-    text += "COLUNAS:\n";
-    for (const col of schemaData.schema.columns) {
-      text += `- ${col.name} (${col.type})\n`;
+/* ========================= TOOLS PARA CLAUDE ========================= */
+const tools = [
+  {
+    name: "search_catalog",
+    description: "Busca arquivos disponíveis no catálogo. Use ANTES de consultar dados para saber quais arquivos existem.",
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["rfb", "pt"], description: "Tipo de dados: rfb (empresas) ou pt (Portal Transparência)" },
+        uf: { type: "string", description: "UF para RFB (ex: SP, MG, RJ)" },
+        dataset: { type: "string", description: "Nome do dataset PT (ex: BolsaFamilia_Pagamentos)" },
+        ref: { type: "string", description: "Período YYYYMM (ex: 202312) para PT" }
+      },
+      required: ["kind"]
     }
-    text += "\n";
+  },
+  {
+    name: "get_schema",
+    description: "Obtém schema + exemplos de um dataset específico. Use para entender a estrutura dos dados.",
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["rfb", "pt"] },
+        uf: { type: "string", description: "UF para RFB" },
+        dataset: { type: "string", description: "Dataset PT" }
+      },
+      required: ["kind"]
+    }
+  },
+  {
+    name: "query_simple",
+    description: "Executa query SQL SIMPLES em 1 arquivo. Use queries LEVES sem UNNEST complexo. Limite 200 linhas.",
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["rfb", "pt"] },
+        uf: { type: "string" },
+        dataset: { type: "string" },
+        ref: { type: "string", description: "Período específico PT" },
+        sql: { type: "string", description: "SQL SELECT simples" }
+      },
+      required: ["kind", "sql"]
+    }
+  }
+];
+
+async function executeTool(toolName, toolInput) {
+  console.log(`🔧 Tool: ${toolName}`, JSON.stringify(toolInput, null, 2));
+  
+  if (toolName === "search_catalog") {
+    const qs = new URLSearchParams();
+    qs.set("kind", toolInput.kind);
+    if (toolInput.uf) qs.set("uf", toolInput.uf);
+    if (toolInput.dataset) qs.set("dataset", toolInput.dataset);
+    if (toolInput.ref) qs.set("ref", toolInput.ref);
+    
+    const { ok, data } = await fetchJSON(`${HETZNER_API_BASE}/catalog/search?${qs}`, {
+      headers: { "X-API-Key": HETZNER_API_KEY }
+    });
+    
+    return ok ? data : { error: "Falha ao buscar catálogo" };
   }
   
-  // SAMPLE (exemplos reais!)
-  if (schemaData.sample && schemaData.sample.length > 0) {
-    text += "EXEMPLOS DE DADOS (primeiras 2 linhas):\n";
-    text += JSON.stringify(schemaData.sample.slice(0, 2), null, 2);
-    text += "\n";
+  if (toolName === "get_schema") {
+    const qs = new URLSearchParams();
+    qs.set("kind", toolInput.kind);
+    if (toolInput.uf) qs.set("uf", toolInput.uf);
+    if (toolInput.dataset) qs.set("dataset", toolInput.dataset);
+    
+    const { ok, data } = await fetchJSON(`${HETZNER_API_BASE}/schema?${qs}`, {
+      headers: { "X-API-Key": HETZNER_API_KEY }
+    });
+    
+    if (!ok) return { error: "Schema não encontrado" };
+    
+    // Retorna apenas schema + 2 samples (não todos)
+    return {
+      table_name: data.table_name,
+      columns: data.schema?.columns || [],
+      sample: (data.sample || []).slice(0, 2)
+    };
   }
   
-  return text;
+  if (toolName === "query_simple") {
+    const body = {
+      kind: toolInput.kind,
+      sql: toolInput.sql,
+      limit: 200
+    };
+    
+    if (toolInput.uf) body.uf = toolInput.uf;
+    if (toolInput.dataset) body.dataset = toolInput.dataset;
+    
+    const { ok, data } = await fetchJSON(`${HETZNER_API_BASE}/sql`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-API-Key": HETZNER_API_KEY },
+      body: JSON.stringify(body)
+    }, 120000);
+    
+    return ok ? { rows: data.rows || [], count: data.row_count || 0 } : { error: data.error || "Query falhou" };
+  }
+  
+  return { error: "Tool desconhecida" };
 }
 
-/* ========================= CLAUDE DECISION ========================= */
-async function claudeDecideSource({ question, catalog }) {
-  const system = `
-Você é assistente inteligente de consulta de dados.
-
-DATASETS DISPONÍVEIS:
-${JSON.stringify(catalog, null, 2)}
-
-REGRAS:
-1. Analise a pergunta do usuário
-2. Decida qual fonte usar:
-   - "rfb" para perguntas sobre empresas, CNPJ, estabelecimentos
-   - "pt" para Portal da Transparência (Bolsa Família, BPC, servidores, etc)
-3. Se RFB, escolha a UF (estados brasileiros)
-4. Se PT, escolha o dataset específico
-5. Responda APENAS com JSON:
-   {
-     "kind": "rfb" ou "pt",
-     "uf": "SP" (se kind=rfb),
-     "dataset": "BolsaFamilia_Pagamentos" (se kind=pt)
-   }
-`.trim();
-
-  const user = `PERGUNTA: "${question}"\n\nQual fonte usar? Responda apenas JSON:`;
-
-  const llm = await anthropic.messages.create({
-    model: "claude-sonnet-4-5-20250929",
-    max_tokens: 200,
-    temperature: 0,
-    system,
-    messages: [{ role: "user", content: user }],
-  });
-
-  const text = llm.content?.[0]?.text || "{}";
-  const clean = text.replace(/```json|```/g, "").trim();
-  return JSON.parse(clean);
-}
-
-async function claudeGenSQL({ question, schemaText, lastError = "" }) {
-  const system = `
-Você é especialista em SQL DuckDB.
-
-REGRAS DE SEGURANÇA:
-- Responda APENAS com SQL puro, sem markdown
-- Apenas SELECT
-- Nunca use: read_parquet, read_csv, attach, detach, httpfs
+/* ========================= CLAUDE AGENTE ========================= */
+async function runAgent(userQuestion) {
+  const messages = [
+    {
+      role: "user",
+      content: `Você é especialista em dados públicos brasileiros (RFB e Portal da Transparência).
 
 IMPORTANTE:
-- Use SOMENTE o schema e exemplos fornecidos
-- Aprenda com os EXEMPLOS DE DADOS para entender a estrutura
-- Para arrays nested, veja os exemplos de como acessar
-`.trim();
+- Use search_catalog ANTES de fazer queries para saber quais arquivos existem
+- Use get_schema para entender a estrutura dos dados
+- Faça queries SIMPLES (evite UNNEST em milhões de linhas)
+- Para contagens, use COUNT simples
+- Se precisar filtrar estabelecimentos, explique que os dados estão nested e é lento
+- Responda em português claro
 
-  const user = `
-${schemaText}
+PERGUNTA DO USUÁRIO: "${userQuestion}"`
+    }
+  ];
+  
+  const system = `Você é um agente de dados especializado em:
+- Receita Federal (RFB): 27 UFs, dados de empresas CNPJ
+- Portal da Transparência (PT): 40+ datasets, pagamentos, servidores, etc
 
-PERGUNTA: "${question}"
-${lastError ? `\nERRO NA ÚLTIMA TENTATIVA:\n${lastError}\nCorrija a SQL.` : ""}
+ESTRATÉGIA:
+1. Use search_catalog para ver arquivos disponíveis
+2. Use get_schema para entender estrutura
+3. Execute queries SIMPLES (sem UNNEST complexo)
+4. Responda em português natural com os resultados
 
-Gere SQL baseada nos exemplos acima:
-`.trim();
+LIMITAÇÕES:
+- Queries com UNNEST em milhões de linhas são LENTAS
+- Prefira agregações simples
+- Explique limitações quando necessário`;
 
-  const llm = await anthropic.messages.create({
-    model: "claude-sonnet-4-5-20250929",
-    max_tokens: 800,
-    temperature: 0,
-    system,
-    messages: [{ role: "user", content: user }],
-  });
-
-  console.log("🔍 SQL do Claude:", llm.content?.[0]?.text);
-  let sql = cleanSQL(llm.content?.[0]?.text || "");
-  sql = fixUnnestAndBug(sql);
-  return sql;
-}
-
-async function runWithRetry(executorFn, ctx) {
-  let sql = await claudeGenSQL(ctx);
-  try {
-    const out = await executorFn(sql);
-    return { sql, out };
-  } catch (e1) {
-    const errMsg = String(e1?.message || e1);
-    sql = await claudeGenSQL({ ...ctx, lastError: errMsg });
-    const out = await executorFn(sql);
-    return { sql, out };
+  let iterations = 0;
+  const maxIterations = 10;
+  
+  while (iterations < maxIterations) {
+    iterations++;
+    
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-5-20250929",
+      max_tokens: 4000,
+      system,
+      messages,
+      tools
+    });
+    
+    console.log(`\n🤖 Iteração ${iterations}:`, response.stop_reason);
+    
+    messages.push({ role: "assistant", content: response.content });
+    
+    if (response.stop_reason === "end_turn") {
+      // Claude terminou - extrai resposta final
+      const textBlocks = response.content.filter(b => b.type === "text");
+      return textBlocks.map(b => b.text).join("\n\n");
+    }
+    
+    if (response.stop_reason === "tool_use") {
+      // Claude quer usar tools
+      const toolResults = [];
+      
+      for (const block of response.content) {
+        if (block.type === "tool_use") {
+          const result = await executeTool(block.name, block.input);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: JSON.stringify(result)
+          });
+        }
+      }
+      
+      messages.push({ role: "user", content: toolResults });
+    } else {
+      break;
+    }
   }
+  
+  return "Desculpe, não consegui processar sua pergunta. Tente reformular.";
 }
 
 /* ========================= ROUTES ========================= */
@@ -219,66 +221,46 @@ app.post("/chat", async (req, res) => {
   try {
     const query = (req.body?.query || "").trim();
     if (!query) return res.json({ error: "Query vazia" });
-
-    // 1. Busca catálogo
-    const catalog = await hetznerCatalog();
-
-    // 2. Claude decide qual fonte usar
-    const decision = await claudeDecideSource({ question: query, catalog });
-
-    // 3. Busca schema + sample da fonte escolhida
-    const schemaData = await hetznerSchema(decision);
-    const schemaText = schemaAndSampleToText(schemaData);
-
-    // 4. Claude gera SQL (aprende sozinho com os exemplos!)
-    const executorFn = decision.kind === "rfb"
-      ? (sql) => hetznerSQL({ kind: "rfb", sql, uf: decision.uf, limit: 200 })
-      : (sql) => hetznerSQLAutoPT({ sql, dataset: decision.dataset, limit: 200 });
-
-    const { sql, out } = await runWithRetry(executorFn, { question: query, schemaText });
-
+    
+    const answer = await runAgent(query);
+    
     return res.json({
-      answer: `✅ Consulta executada (${decision.kind === "rfb" ? `UF ${decision.uf}` : decision.dataset}).`,
-      sql,
-      rows: out.rows || [],
-      row_count: out.row_count ?? (out.rows?.length || 0),
-      source: decision,
-      duration_ms: Date.now() - start,
+      answer,
+      duration_ms: Date.now() - start
     });
-
+    
   } catch (err) {
-    return res.status(500).json({ error: err.message, duration_ms: Date.now() - start });
+    console.error("Erro:", err);
+    return res.status(500).json({ 
+      error: err.message, 
+      duration_ms: Date.now() - start 
+    });
   }
 });
 
 app.get("/health", async (_, res) => {
-  let hetznerOk = false, qdrantOk = false;
-
+  let hetznerOk = false;
   try {
-    const r = await fetch(`${HETZNER_API_BASE}/health`, { headers: { "X-API-Key": HETZNER_API_KEY } });
+    const r = await fetch(`${HETZNER_API_BASE}/health`, { 
+      headers: { "X-API-Key": HETZNER_API_KEY } 
+    });
     hetznerOk = r.ok;
   } catch {}
-
-  try {
-    const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}`);
-    qdrantOk = r.ok;
-  } catch {}
-
+  
   res.json({
     ok: true,
     timestamp: new Date().toISOString(),
-    hetzner_api: { ok: hetznerOk, base: HETZNER_API_BASE },
-    qdrant: { ok: qdrantOk, url: QDRANT_URL, collection: QDRANT_COLLECTION }
+    hetzner_api: { ok: hetznerOk, base: HETZNER_API_BASE }
   });
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
-  console.log("🚀 BrazilDataCorp API — Schema + Sample Learning");
+  console.log("🚀 BrazilDataCorp — AGENTE INTELIGENTE");
   console.log("═".repeat(60));
   console.log(`📡 Porta: ${PORT}`);
   console.log(`🧱 Hetzner API: ${HETZNER_API_BASE}`);
-  console.log(`📚 Qdrant: ${QDRANT_URL}`);
+  console.log(`🤖 Claude Agent: Catálogo + Tools`);
   console.log("═".repeat(60));
 });
