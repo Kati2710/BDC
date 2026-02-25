@@ -57,21 +57,21 @@ const tools = [
   },
   {
     name: "query_simple",
-    description: "Executa 1 query SQL.",
+    description: "Executa SQL. SEMPRE use 'FROM data' para PT datasets. Exemplo: SELECT * FROM data WHERE coluna='valor'",
     input_schema: {
       type: "object",
       properties: {
         kind: { type: "string", enum: ["rfb", "pt"] },
         uf: { type: "string" },
         dataset: { type: "string" },
-        sql: { type: "string" }
+        sql: { type: "string", description: "SQL query. PT: FROM data | RFB: FROM rfb" }
       },
       required: ["kind", "sql"]
     }
   },
   {
     name: "query_multiple",
-    description: "Executa múltiplas queries em PARALELO.",
+    description: "Executa múltiplas queries em PARALELO. PT: FROM data | RFB: FROM rfb",
     input_schema: {
       type: "object",
       properties: {
@@ -144,7 +144,8 @@ async function executeTool(toolName, toolInput) {
     
     return {
       dataset: toolInput.dataset || toolInput.uf,
-      table_name: data.table_name,
+      table_name: "data",
+      note: "IMPORTANTE: A tabela SEMPRE se chama 'data' (não use o nome do dataset!)",
       columns: (data.schema?.columns || []).slice(0, 15).map(c => `${c.name} (${c.type})`).join(", "),
       sample_row: data.sample?.[0] || null
     };
@@ -229,23 +230,29 @@ async function runAgent(userQuestion) {
   
   const system = `Especialista em dados públicos. SEJA EFICIENTE:
 
-REGRAS:
-1. find_datasets_semantic UMA VEZ APENAS por pergunta
-2. get_schema: PT datasets NÃO usam "uf", só "dataset"
-3. RFB usa "uf", PT usa "dataset"
-4. SEMPRE inclua colunas _audit_* nas queries
+REGRAS CRÍTICAS:
+1. find_datasets_semantic UMA VEZ APENAS
+2. TABELA se chama "data" (SEMPRE!)
+3. PT: kind="pt", dataset="NomeDataset"
+4. RFB: kind="rfb", uf="SP"
 
-WORKFLOW:
-1. find_datasets_semantic("termos relevantes") → UMA VEZ
-2. get_schema(kind="pt", dataset="NomeDataset") 
-3. query_multiple (paralelo)
-4. cross_results se necessário
-5. RESPONDA com dados + fontes
+EXEMPLO CORRETO:
+{
+  kind: "pt",
+  dataset: "Acordos",
+  sql: "SELECT * FROM data WHERE coluna LIKE '%valor%' LIMIT 100"
+}
 
 CNPJ:
-- PT: 14 dígitos completos
-- RFB: 8 dígitos (cnpj_basico)
-- Cruzar: SUBSTRING("CNPJ DO SANCIONADO", 1, 8)
+- PT: 14 dígitos (coluna varia: "CNPJ DO SANCIONADO", "CPF OU CNPJ")
+- RFB: 8 dígitos (empresa.cnpj_basico)
+- Cruzar: SUBSTRING(cnpj_completo, 1, 8)
+
+WORKFLOW:
+1. find_datasets_semantic → UMA VEZ
+2. get_schema
+3. query_multiple (tabela = "data")
+4. RESPONDA com fontes (_audit_*)
 
 Máximo 8 iterações.`;
 
