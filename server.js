@@ -145,9 +145,8 @@ async function executeTool(toolName, toolInput) {
     return {
       dataset: toolInput.dataset || toolInput.uf,
       table_name: "data",
-      note: "IMPORTANTE: A tabela SEMPRE se chama 'data' (não use o nome do dataset!)",
-      columns: (data.schema?.columns || []).slice(0, 15).map(c => `${c.name} (${c.type})`).join(", "),
-      sample_row: data.sample?.[0] || null
+      note: "TABELA = 'data'. Colunas principais:",
+      columns: (data.schema?.columns || []).slice(0, 10).map(c => c.name).join(", ")
     };
   }
   
@@ -264,7 +263,7 @@ Máximo 8 iterações.`;
     
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
-      max_tokens: 1500,
+      max_tokens: 800,
       system,
       messages,
       tools
