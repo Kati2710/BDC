@@ -39,6 +39,8 @@ app.post("/chat", async (req, res) => {
       body: JSON.stringify({ query, top_k: 3 })
     });
     
+    console.log("🔍 DEBUG semantic:", JSON.stringify(semantic, null, 2));
+    
     const datasets = semantic.results || [];
     console.log(`📋 Encontrados: ${datasets.map(d => d.dataset).join(", ")}`);
     
