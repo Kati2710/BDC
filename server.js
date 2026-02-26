@@ -229,34 +229,49 @@ async function runAgent(userQuestion) {
   
   const system = `Especialista em dados públicos. SEJA EFICIENTE:
 
-REGRAS CRÍTICAS:
-1. find_datasets_semantic UMA VEZ APENAS
-2. TABELA se chama "data" (SEMPRE!)
-3. PT: kind="pt", dataset="NomeDataset"
-4. RFB: kind="rfb", uf="SP"
+REGRAS:
+1. find_datasets_semantic UMA VEZ
+2. PT: tabela = "data", RFB: tabela = "rfb"
+3. RFB tem dados NESTED (list/struct)
 
-EXEMPLO CORRETO:
+EXEMPLOS CORRETOS:
+
+PT (simples):
 {
   kind: "pt",
   dataset: "Acordos",
   sql: "SELECT * FROM data WHERE coluna LIKE '%valor%' LIMIT 100"
 }
 
+RFB (dados nested):
+{
+  kind: "rfb",
+  uf: "SP",
+  sql: "SELECT empresa.cnpj_basico, empresa.razao_social, estabelecimentos[1].uf, estabelecimentos[1].situacao_cadastral FROM rfb LIMIT 100"
+}
+
+IMPORTANTE RFB:
+- empresa.* = struct (acesso direto)
+- estabelecimentos = list (usar [1], [2] ou UNNEST)
+- socios = list (usar [1] ou UNNEST)
+- simples.* = struct (acesso direto)
+
 CNPJ:
-- PT: 14 dígitos (coluna varia: "CNPJ DO SANCIONADO", "CPF OU CNPJ")
+- PT: 14 dígitos ("CNPJ DO SANCIONADO")
 - RFB: 8 dígitos (empresa.cnpj_basico)
-- Cruzar: SUBSTRING(cnpj_completo, 1, 8)
+- Cruzar: SUBSTRING(cnpj_pt, 1, 8) = empresa.cnpj_basico
 
 WORKFLOW:
-1. find_datasets_semantic → UMA VEZ
+1. find_datasets_semantic
 2. get_schema
-3. query_multiple (tabela = "data")
-4. RESPONDA com fontes (_audit_*)
+3. query_multiple
+4. cross_results se necessário
+5. RESPONDA com fontes
 
 Máximo 8 iterações.`;
 
   let iterations = 0;
-  const maxIterations = 8;
+  const maxIterations = 10;
   
   while (iterations < maxIterations) {
     iterations++;
