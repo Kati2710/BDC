@@ -31,12 +31,18 @@ app.post("/chat", async (req, res) => {
   try {
     console.log(`\n${"=".repeat(60)}\n❓ PERGUNTA: "${query}"\n${"=".repeat(60)}`);
     
-    // PASSO 1: Busca dataset semanticamente
+    // PASSO 1: Extrai keywords da pergunta (regex simples)
+    console.log("🔍 Extraindo keywords...");
+    const stopWords = /\b(mostre|quero|ver|empresas?|dados?|informações?|me|dê|de|em|que|têm|tem|com|sobre|das?|dos?|nos?|nas?)\b/gi;
+    const keywords = query.replace(stopWords, " ").trim().replace(/\s+/g, " ");
+    console.log(`🔑 Keywords: "${keywords}"`);
+    
+    // PASSO 2: Busca dataset semanticamente
     console.log("🔍 Buscando datasets relevantes...");
     const semantic = await fetchAPI("/search_semantic", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query, top_k: 3 })
+      body: JSON.stringify({ query: keywords, top_k: 3 })
     });
     
     console.log("🔍 DEBUG semantic:", JSON.stringify(semantic, null, 2));
