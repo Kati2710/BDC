@@ -10,17 +10,6 @@ const HETZNER_API = process.env.HETZNER_API_BASE || "http://89.167.48.3:5010";
 const HETZNER_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura";
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-/* ========================= HELPERS ========================= */
-async function fetchAPI(endpoint, opts = {}) {
-  const url = `${HETZNER_API}${endpoint}`;
-  const res = await fetch(url, {
-    ...opts,
-    headers: { ...opts.headers, "X-API-Key": HETZNER_KEY },
-    signal: AbortSignal.timeout(120000)
-  });
-  return await res.json();
-}
-
 /* ========================= MAIN HANDLER ========================= */
 app.post("/chat", async (req, res) => {
   const start = Date.now();
@@ -29,175 +18,106 @@ app.post("/chat", async (req, res) => {
   if (!query) return res.json({ error: "Query vazia" });
   
   try {
-    console.log(`\n${"=".repeat(60)}\n❓ PERGUNTA: "${query}"\n${"=".repeat(60)}`);
+    console.log(`\n${"=".repeat(60)}\n❓ "${query}"\n${"=".repeat(60)}`);
     
-    // PASSO 1: Extrai keywords da pergunta (regex simples)
-    console.log("🔍 Extraindo keywords...");
-    const stopWords = /\b(mostre|quero|ver|empresas?|dados?|informações?|me|dê|de|em|que|têm|tem|com|sobre|das?|dos?|nos?|nas?)\b/gi;
-    const keywords = query.replace(stopWords, " ").trim().replace(/\s+/g, " ");
-    console.log(`🔑 Keywords: "${keywords}"`);
+    // PASSO 1: Claude gera SQL
+    console.log("🤖 Claude gerando SQL...");
     
-    // PASSO 2: Busca dataset semanticamente
-    console.log("🔍 Buscando datasets relevantes...");
-    const semantic = await fetchAPI("/search_semantic", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: keywords, top_k: 3 })
-    });
-    
-    console.log("🔍 DEBUG semantic:", JSON.stringify(semantic, null, 2));
-    
-    const datasets = semantic.results || [];
-    console.log(`📋 Encontrados: ${datasets.map(d => d.dataset).join(", ")}`);
-    
-    // PASSO 2: Claude decide e executa (1 CHAMADA SÓ!)
-    console.log("🤖 Claude processando...");
-    
-    const response = await anthropic.messages.create({
+    const sqlGen = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
-      max_tokens: 2000,
+      max_tokens: 1000,
       messages: [{
         role: "user",
         content: `Você é analista de dados públicos brasileiros.
 
-DATASETS DISPONÍVEIS:
-${datasets.map(d => `- ${d.dataset} (relevância: ${d.score.toFixed(2)})`).join("\n")}
+BANCO DE DADOS UNIFICADO:
 
-DADOS:
-- RFB: empresas por UF (tabela "rfb")
-  - empresa.cnpj_basico (8 dígitos), empresa.razao_social, empresa.porte
-  - estabelecimentos[1].uf, estabelecimentos[1].situacao_cadastral, estabelecimentos[1].municipio
-  
-- PT: cada dataset tem tabela "data"
-  - Acordos: "CNPJ DO SANCIONADO" (14 dígitos), "RAZÃO SOCIAL – CADASTRO RECEITA", "SITUAÇÃO DO ACORDO DE LENIÊNICA"
-  - Acordos NÃO tem coluna UF! Use o CNPJ completo.
+Tabela: _acordos_auditado (143 linhas)
+Colunas:
+  - "ID DO ACORDO" (INT)
+  - "CNPJ DO SANCIONADO" (VARCHAR 14 dígitos)
+  - "RAZÃO SOCIAL – CADASTRO RECEITA" (VARCHAR)
+  - "NOME FANTASIA – CADASTRO RECEITA" (VARCHAR)
+  - "SITUAÇÃO DO ACORDO DE LENIÊNICA" (VARCHAR)
+  - "DATA DE INÍCIO DO ACORDO" (DATE)
+  - "DATA DE FIM DO ACORDO" (DATE)
+  - "ÓRGÃO SANCIONADOR" (VARCHAR)
+  - _audit_url_download, _audit_data_disponibilizacao_gov, _audit_periodicidade
 
-IMPORTANTE CRUZAMENTO RFB + PT:
-Para cruzar empresas PT com RFB por UF:
-1. Query PT: SELECT "CNPJ DO SANCIONADO" FROM data (sem filtro UF!)
-2. Query RFB: WHERE empresa.cnpj_basico IN (lista dos 8 primeiros dígitos) AND estabelecimentos[1].uf='SP'
+Tabela: _empresas_sp (20 milhões de linhas - RFB SP flatten)
+Colunas:
+  - cnpj_basico (VARCHAR 8 dígitos)
+  - razao_social (VARCHAR)
+  - porte (VARCHAR)
+  - capital_social (DECIMAL)
+  - natureza_juridica (VARCHAR)
+  - est (STRUCT com: uf, municipio, situacao_cadastral, bairro, cep, etc)
 
-EXEMPLO CORRETO:
-Pergunta: "Empresas SP com acordo de leniência"
-```json
-{
-  "plan": "Buscar TODOS acordos (PT não tem UF), extrair CNPJs, buscar no RFB de SP",
-  "queries": [
-    {
-      "kind": "pt",
-      "dataset": "Acordos", 
-      "sql": "SELECT \"CNPJ DO SANCIONADO\", \"RAZÃO SOCIAL – CADASTRO RECEITA\", \"SITUAÇÃO DO ACORDO DE LENIÊNICA\" FROM data LIMIT 200",
-      "label": "acordos"
-    }
-  ]
-}
-```
+CRUZAMENTO RFB + PT:
+Para ligar as duas tabelas use:
+  SUBSTRING(a."CNPJ DO SANCIONADO", 1, 8) = e.cnpj_basico
 
-DEPOIS: Use os CNPJs retornados para buscar no RFB.
+EXEMPLO SQL:
+SELECT 
+  a."CNPJ DO SANCIONADO",
+  a."RAZÃO SOCIAL – CADASTRO RECEITA",
+  e.razao_social as razao_rfb,
+  e.est.municipio,
+  e.est.situacao_cadastral
+FROM _acordos_auditado a
+LEFT JOIN _empresas_sp e 
+  ON SUBSTRING(a."CNPJ DO SANCIONADO", 1, 8) = e.cnpj_basico
+WHERE e.est.uf = 'SP'
+LIMIT 10
 
-FERRAMENTAS:
-Para consultar dados, retorne JSON:
-{
-  "plan": "Explicação do que vai fazer",
-  "queries": [
-    {"kind": "rfb|pt", "uf": "SP", "dataset": "Acordos", "sql": "SELECT ..."}
-  ]
-}
+PERGUNTA DO USUÁRIO:
+"${query}"
 
-PERGUNTA: "${query}"
-
-Responda APENAS com o JSON das queries necessárias. Sem explicação extra.`
+Responda APENAS com o SQL necessário. Sem explicações, sem markdown, apenas SQL puro.`
       }]
     });
     
-    const text = response.content.find(b => b.type === "text")?.text || "{}";
-    const plan = JSON.parse(text.replace(/```json\n?/g, "").replace(/```/g, ""));
+    let sql = sqlGen.content.find(b => b.type === "text")?.text.trim() || "";
+    sql = sql.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
     
-    console.log(`📝 Plano: ${plan.plan}`);
-    console.log(`📊 Queries: ${plan.queries?.length || 0}`);
+    console.log(`📝 SQL: ${sql.substring(0, 200)}...`);
     
-    // PASSO 3: Executa queries
-    const results = {};
-    for (const q of (plan.queries || [])) {
-      console.log(`⚡ Executando: ${q.kind} ${q.dataset || q.uf}`);
-      console.log(`   SQL: ${q.sql.substring(0, 150)}...`);
-      
-      const body = { kind: q.kind, sql: q.sql, limit: 200 };
-      if (q.uf) body.uf = q.uf;
-      if (q.dataset) body.dataset = q.dataset;
-      
-      const data = await fetchAPI("/sql", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      
-      results[q.label || "result"] = data.rows || [];
-      console.log(`  ✅ ${data.row_count || 0} linhas`);
+    // PASSO 2: Executa SQL
+    console.log("⚡ Executando...");
+    
+    const response = await fetch(`${HETZNER_API}/query_unified`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": HETZNER_KEY
+      },
+      body: JSON.stringify({ sql }),
+      signal: AbortSignal.timeout(120000)
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(data.error || "Query falhou");
     }
     
-    // PASSO 3.5: Auto-cruzamento PT + RFB se aplicável
-    const ptResult = results.acordos || results.pt || [];
-    const rfbQuery = plan.queries?.find(q => q.kind === "rfb");
+    console.log(`📊 ${data.row_count || 0} linhas retornadas`);
     
-    if (ptResult.length > 0 && rfbQuery && rfbQuery.uf) {
-      console.log("🔗 Auto-cruzamento PT + RFB...");
-      
-      // Extrai CNPJs de 8 dígitos do resultado PT
-      const cnpjs8 = ptResult
-        .map(row => {
-          const cnpj = row["CNPJ DO SANCIONADO"] || row["CPF OU CNPJ"] || "";
-          return cnpj.replace(/\D/g, "").substring(0, 8);
-        })
-        .filter(c => c.length === 8);
-      
-      if (cnpjs8.length > 0) {
-        console.log(`  📋 ${cnpjs8.length} CNPJs únicos extraídos`);
-        
-        // Query RFB com esses CNPJs específicos
-        const rfbCrossQuery = {
-          kind: "rfb",
-          uf: rfbQuery.uf,
-          sql: `SELECT 
-            empresa.cnpj_basico, 
-            empresa.razao_social, 
-            empresa.porte,
-            estabelecimentos[1].uf, 
-            estabelecimentos[1].municipio,
-            estabelecimentos[1].situacao_cadastral
-          FROM rfb 
-          WHERE empresa.cnpj_basico IN ('${cnpjs8.join("','")}')
-          LIMIT 200`
-        };
-        
-        const rfbData = await fetchAPI("/sql", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(rfbCrossQuery)
-        });
-        
-        results.empresas_cruzadas = rfbData.rows || [];
-        console.log(`  ✅ ${rfbData.row_count || 0} empresas encontradas no RFB`);
-      }
-    }
-    
-    // PASSO 4: Claude explica resultado
+    // PASSO 3: Claude explica
     console.log("💬 Claude explicando...");
     
     const explanation = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 1500,
-      messages: [
-        {
-          role: "user",
-          content: `Pergunta: "${query}"
+      messages: [{
+        role: "user",
+        content: `Pergunta: "${query}"
 
-Resultados:
-${JSON.stringify(results, null, 2)}
+Resultados (${data.row_count} linhas):
+${JSON.stringify(data.rows, null, 2)}
 
-Explique os resultados em português de forma clara e objetiva. SEMPRE cite as fontes dos dados (use colunas _audit_* se disponíveis).`
-        }
-      ]
+Explique os resultados em português de forma clara. SEMPRE cite fontes usando as colunas _audit_* quando disponíveis.`
+      }]
     });
     
     const answer = explanation.content.find(b => b.type === "text")?.text || "Sem resposta";
@@ -207,7 +127,7 @@ Explique os resultados em português de forma clara e objetiva. SEMPRE cite as f
     return res.json({
       answer,
       duration_ms: Date.now() - start,
-      queries_executed: plan.queries?.length || 0
+      rows_returned: data.row_count
     });
     
   } catch (err) {
@@ -225,8 +145,7 @@ app.get("/health", async (_, res) => {
       headers: { "X-API-Key": HETZNER_KEY },
       signal: AbortSignal.timeout(5000)
     });
-    const ok = r.ok;
-    res.json({ ok: true, hetzner: ok });
+    res.json({ ok: true, hetzner: r.ok });
   } catch {
     res.json({ ok: true, hetzner: false });
   }
@@ -235,10 +154,11 @@ app.get("/health", async (_, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
-  console.log("🚀 BDC — ARQUITETURA SIMPLIFICADA");
+  console.log("🚀 BDC — ARQUITETURA MOTHERDUCK NO HETZNER");
   console.log("═".repeat(60));
   console.log(`📡 Porta: ${PORT}`);
   console.log(`🧱 API: ${HETZNER_API}`);
+  console.log(`🗄️ Banco: brazildatacorp.duckdb (unificado)`);
   console.log(`⚡ 2 chamadas Claude por pergunta`);
   console.log("═".repeat(60));
 });
