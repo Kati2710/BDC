@@ -67,11 +67,33 @@ DADOS:
 - RFB: empresas por UF (tabela "rfb")
   - empresa.cnpj_basico (8 dígitos), empresa.razao_social, empresa.porte
   - estabelecimentos[1].uf, estabelecimentos[1].situacao_cadastral, estabelecimentos[1].municipio
-  - socios[1].nome_socio
   
 - PT: cada dataset tem tabela "data"
-  - Acordos: "CNPJ DO SANCIONADO" (14 dígitos), "RAZÃO SOCIAL", "SITUAÇÃO DO ACORDO"
-  - Outros datasets similares
+  - Acordos: "CNPJ DO SANCIONADO" (14 dígitos), "RAZÃO SOCIAL – CADASTRO RECEITA", "SITUAÇÃO DO ACORDO DE LENIÊNICA"
+  - Acordos NÃO tem coluna UF! Use o CNPJ completo.
+
+IMPORTANTE CRUZAMENTO RFB + PT:
+Para cruzar empresas PT com RFB por UF:
+1. Query PT: SELECT "CNPJ DO SANCIONADO" FROM data (sem filtro UF!)
+2. Query RFB: WHERE empresa.cnpj_basico IN (lista dos 8 primeiros dígitos) AND estabelecimentos[1].uf='SP'
+
+EXEMPLO CORRETO:
+Pergunta: "Empresas SP com acordo de leniência"
+```json
+{
+  "plan": "Buscar TODOS acordos (PT não tem UF), extrair CNPJs, buscar no RFB de SP",
+  "queries": [
+    {
+      "kind": "pt",
+      "dataset": "Acordos", 
+      "sql": "SELECT \"CNPJ DO SANCIONADO\", \"RAZÃO SOCIAL – CADASTRO RECEITA\", \"SITUAÇÃO DO ACORDO DE LENIÊNICA\" FROM data LIMIT 200",
+      "label": "acordos"
+    }
+  ]
+}
+```
+
+DEPOIS: Use os CNPJs retornados para buscar no RFB.
 
 FERRAMENTAS:
 Para consultar dados, retorne JSON:
@@ -98,6 +120,7 @@ Responda APENAS com o JSON das queries necessárias. Sem explicação extra.`
     const results = {};
     for (const q of (plan.queries || [])) {
       console.log(`⚡ Executando: ${q.kind} ${q.dataset || q.uf}`);
+      console.log(`   SQL: ${q.sql.substring(0, 150)}...`);
       
       const body = { kind: q.kind, sql: q.sql, limit: 200 };
       if (q.uf) body.uf = q.uf;
@@ -111,6 +134,51 @@ Responda APENAS com o JSON das queries necessárias. Sem explicação extra.`
       
       results[q.label || "result"] = data.rows || [];
       console.log(`  ✅ ${data.row_count || 0} linhas`);
+    }
+    
+    // PASSO 3.5: Auto-cruzamento PT + RFB se aplicável
+    const ptResult = results.acordos || results.pt || [];
+    const rfbQuery = plan.queries?.find(q => q.kind === "rfb");
+    
+    if (ptResult.length > 0 && rfbQuery && rfbQuery.uf) {
+      console.log("🔗 Auto-cruzamento PT + RFB...");
+      
+      // Extrai CNPJs de 8 dígitos do resultado PT
+      const cnpjs8 = ptResult
+        .map(row => {
+          const cnpj = row["CNPJ DO SANCIONADO"] || row["CPF OU CNPJ"] || "";
+          return cnpj.replace(/\D/g, "").substring(0, 8);
+        })
+        .filter(c => c.length === 8);
+      
+      if (cnpjs8.length > 0) {
+        console.log(`  📋 ${cnpjs8.length} CNPJs únicos extraídos`);
+        
+        // Query RFB com esses CNPJs específicos
+        const rfbCrossQuery = {
+          kind: "rfb",
+          uf: rfbQuery.uf,
+          sql: `SELECT 
+            empresa.cnpj_basico, 
+            empresa.razao_social, 
+            empresa.porte,
+            estabelecimentos[1].uf, 
+            estabelecimentos[1].municipio,
+            estabelecimentos[1].situacao_cadastral
+          FROM rfb 
+          WHERE empresa.cnpj_basico IN ('${cnpjs8.join("','")}')
+          LIMIT 200`
+        };
+        
+        const rfbData = await fetchAPI("/sql", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(rfbCrossQuery)
+        });
+        
+        results.empresas_cruzadas = rfbData.rows || [];
+        console.log(`  ✅ ${rfbData.row_count || 0} empresas encontradas no RFB`);
+      }
     }
     
     // PASSO 4: Claude explica resultado
