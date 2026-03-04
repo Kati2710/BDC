@@ -21,8 +21,9 @@ BANCO: brazildatacorp.duckdb | 5 bilhões de linhas | 475 tabelas | Motor: DuckD
    - DOUBLE: aritmética normal
    - STRUCT: acesse campos com ponto — est.situacao_cadastral, est.municipio, est.uf
 2. DATAS YYYYMM (MÊS COMPETÊNCIA, MÊS REFERÊNCIA, MÊS DISPONIBILIZAÇÃO, ANO / MÊS) são BIGINT:
-   - Ano: WHERE "MÊS COMPETÊNCIA" / 100 = 2024
-   - Mês: WHERE "MÊS COMPETÊNCIA" = 202401
+   - Filtrar por ano: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412
+   - Filtrar por mês: WHERE "MÊS COMPETÊNCIA" = 202401
+   - NUNCA use / 100 = 2024 — retorna sempre zero por causa de precisão inteira
 3. VALORES MONETÁRIOS são VARCHAR com vírgula: SUM(CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL))
 4. EMPRESAS RFB — coluna est é STRUCT:
    - est.situacao_cadastral: 'ATIVA', 'BAIXADA', 'INAPTA', 'SUSPENSA', 'NULA'
