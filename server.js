@@ -31,6 +31,8 @@ BANCO: brazildatacorp.duckdb | 5 bilhões de linhas | 475 tabelas | Motor: DuckD
 5. BOLSA FAMÍLIA: até 2021 → _bolsafamilia_pagamentos; 2022-2025 → _novobolsafamilia
 6. SERVIDORES — ANO e MES são VARCHAR: WHERE ANO = '2024' AND MES = '01'
 7. LIMIT 100 em queries de listagem; sem LIMIT em COUNT/SUM/agregações
+8. CTEs (WITH): não aplique REPLACE/CAST em colunas já computadas como DECIMAL dentro da CTE — use a coluna diretamente: AVG(coluna_decimal), não AVG(CAST(REPLACE(coluna_decimal,...)))
+9. Sempre use aspas duplas em nomes de colunas com espaços, acentos ou parênteses
 8. Aspas duplas obrigatórias em colunas com espaços/acentos/parênteses
 
 == TABELAS ==
@@ -76,14 +78,16 @@ _empresas_ms(914K), _empresas_pb(881K), _empresas_rn(787K), _empresas_am(740K), 
 _empresas_pi(593K), _empresas_ro(476K), _empresas_to(460K), _empresas_se(457K), _empresas_ex(169K),
 _empresas_ap(151K), _empresas_ac(158K), _empresas_rr(134K)
 Todas com: cnpj_basico(VARCHAR 8 dígitos), razao_social(VARCHAR), porte(VARCHAR), capital_social(DOUBLE), est(STRUCT)
-est campos: est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'), est.municipio, est.uf,
-  porte valores: 'MICRO EMPRESA', 'EMPRESA DE PEQUENO PORTE', 'DEMAIS' — NÃO existe 'MEI' como porte separado
-            est.cnpj_completo, est.cnae_principal, est.cnae_principal_codigo,
-            est.cnaes_secundarios_codigos(VARCHAR[]), est.cnaes_secundarios_descricoes(VARCHAR[]),
-            est.data_inicio_atividade(VARCHAR formato 'YYYYMMDD' — para filtrar por ano use: est.data_inicio_atividade LIKE '2024%'),
-            est.data_situacao_cadastral(VARCHAR), est.nome_fantasia,
-            est.matriz_filial, est.motivo_situacao, est.cep, est.bairro, est.logradouro,
-            est.numero, est.telefone_1, est.correio_eletronico
+porte valores: 'MICRO EMPRESA', 'EMPRESA DE PEQUENO PORTE', 'DEMAIS' — NÃO existe 'MEI' como porte separado. MEI não é identificável diretamente — use porte = 'MICRO EMPRESA' como aproximação
+est campos: est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'), est.situacao_cadastral_codigo, est.municipio, est.municipio_codigo, est.uf,
+            est.cnpj_completo, est.cnpj_basico, est.cnpj_ordem, est.cnpj_dv,
+            est.cnae_principal, est.cnae_principal_codigo, est.cnaes_secundarios_codigos(VARCHAR[]), est.cnaes_secundarios_descricoes(VARCHAR[]),
+            est.data_inicio_atividade(VARCHAR 'YYYYMMDD' — filtrar por ano: est.data_inicio_atividade LIKE '2024%'),
+            est.data_situacao_cadastral(VARCHAR), est.nome_fantasia, est.matriz_filial, est.matriz_filial_codigo,
+            est.motivo_situacao, est.motivo_situacao_codigo, est.situacao_especial, est.data_situacao_especial,
+            est.cep, est.bairro, est.logradouro, est.tipo_logradouro, est.numero, est.complemento,
+            est.telefone_1, est.telefone_2, est.ddd_1, est.ddd_2, est.fax, est.ddd_fax,
+            est.correio_eletronico, est.pais, est.pais_codigo, est.cidade_exterior
 
 -- SERVIDORES --
 _servidores_cadastro (19M — civis ativos):
@@ -128,6 +132,7 @@ _despesasdiarias_despesas_itemempenho (33M):
 
 _despesas_favorecidos (114M):
   "Código Favorecido"(VARCHAR), "Nome Favorecido"(VARCHAR), "Sigla UF"(VARCHAR), "Nome Município"(VARCHAR), "Código Órgão Superior"(BIGINT), "Nome Órgão Superior"(VARCHAR), "Código Órgão"(BIGINT), "Nome Órgão"(VARCHAR), "Código Unidade Gestora"(BIGINT), "Nome Unidade Gestora"(VARCHAR), "Ano e mês do lançamento"(VARCHAR), "Valor Recebido"(VARCHAR)
+  ATENÇÃO: nesta tabela o campo chama "Nome Favorecido" — nas outras tabelas de despesas chama "Favorecido"
 
 -- VIAGENS --
 _viagens_viagem (9M):
