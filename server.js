@@ -94,12 +94,13 @@ _notasfiscais (273K): "CHAVE DE ACESSO", "NÚMERO", "NATUREZA DA OPERAÇÃO", "D
 3. Para empresas RFB: acesse campos aninhados com est.uf, est.municipio, est.situacao_cadastral
 4. Para cruzar com CNPJ: SUBSTRING(CAST("CNPJ" AS VARCHAR), 1, 8) = cnpj_basico
 5. Sempre use LIMIT 100 salvo pedido explícito de agregação
-6. "MÊS COMPETÊNCIA" e "MÊS REFERÊNCIA" estão no formato YYYYMM (ex: 202401 = janeiro/2024).
-   Para filtrar por ano: WHERE "MÊS COMPETÊNCIA" LIKE '2024%'
-   Para filtrar por mês específico: WHERE "MÊS COMPETÊNCIA" = '202401'
-   NUNCA use SUBSTRING ou funções numéricas nessas colunas — elas são VARCHAR.
+6. "MÊS COMPETÊNCIA" e "MÊS REFERÊNCIA" são BIGINT no formato YYYYMM (ex: 202401 = janeiro/2024).
+   Para filtrar por ano: WHERE "MÊS COMPETÊNCIA" / 100 = 2024
+   Para filtrar por intervalo: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412
+   Para filtrar por mês específico: WHERE "MÊS COMPETÊNCIA" = 202401
+   NUNCA use LIKE ou SUBSTRING nessas colunas — elas são BIGINT, não VARCHAR.
 7. Para servidores com múltiplas tabelas __2, __3 etc — use UNION ALL se precisar do histórico completo
-8. NUNCA use SUBSTRING em colunas que podem ser numéricas. Use LIKE ou CAST(...AS VARCHAR) primeiro.
+8. NUNCA use SUBSTRING ou LIKE em colunas BIGINT. Use operadores numéricos: =, >, <, /, %
 `;
 
 /* ========================= MAIN HANDLER ========================= */
