@@ -77,6 +77,7 @@ _empresas_pi(593K), _empresas_ro(476K), _empresas_to(460K), _empresas_se(457K), 
 _empresas_ap(151K), _empresas_ac(158K), _empresas_rr(134K)
 Todas com: cnpj_basico(VARCHAR 8 dígitos), razao_social(VARCHAR), porte(VARCHAR), capital_social(DOUBLE), est(STRUCT)
 est campos: est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'), est.municipio, est.uf,
+  porte valores: 'MICRO EMPRESA', 'EMPRESA DE PEQUENO PORTE', 'DEMAIS' — NÃO existe 'MEI' como porte separado
             est.cnpj_completo, est.cnae_principal, est.cnae_principal_codigo,
             est.cnaes_secundarios_codigos(VARCHAR[]), est.cnaes_secundarios_descricoes(VARCHAR[]),
             est.data_inicio_atividade(VARCHAR formato 'YYYYMMDD' — para filtrar por ano use: est.data_inicio_atividade LIKE '2024%'),
