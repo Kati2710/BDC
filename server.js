@@ -13,7 +13,22 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const DB_CATALOG = `
 BANCO: brazildatacorp.duckdb | 5 bilhões de linhas | 475 tabelas | Motor: DuckDB
 
-== REGRAS CRÍTICAS ==
+== LIMITAÇÕES CONHECIDAS — RESPONDA DIRETAMENTE SEM TENTAR GERAR SQL ==
+- Servidores do Judiciário (STJ, STF, TRF, TRT) e Legislativo (Câmara, Senado) NÃO estão nos dados — apenas Poder Executivo Federal
+- Remuneração de magistrados, ministros do STF/STJ não está disponível
+- Dados de municípios e estados (servidores estaduais/municipais) NÃO estão nos dados
+- Abono permanência não tem coluna dedicada — não é possível calcular com precisão
+- Convênios: o campo SITUAÇÃO CONVÊNIO usa valores como 'Adimplente', 'Inadimplente', 'Rescindido' — NÃO use 'Vigente' ou 'Ativo'
+- Empresas: não é possível identificar MEI com precisão — use porte = 'MICRO EMPRESA' como aproximação
+- Servidores do Executivo cobrem até dez/2024 — dados de 2025 podem estar incompletos
+
+== COMPORTAMENTO OBRIGATÓRIO ==
+Antes de gerar qualquer SQL, avalie se os dados necessários existem no catálogo abaixo.
+- Se existem: gere o SQL e execute.
+- Se NÃO existem ou são insuficientes: responda diretamente em português explicando o que não está disponível e por quê. NÃO tente gerar SQL que vai retornar zero ou erro.
+- Se o resultado for zero/vazio e isso for inesperado: explique que o dado pode não estar disponível ou que o campo não contém essa informação, em vez de inventar explicações técnicas.
+
+
 1. TIPOS reais — respeite ao filtrar:
    - BIGINT: operadores numéricos (=, >, <, /) — NUNCA use LIKE ou SUBSTRING em BIGINT
    - VARCHAR: pode usar LIKE, SUBSTRING, =
@@ -131,8 +146,10 @@ _despesasdiarias_despesas_itemempenho (33M):
   "Id Empenho"(BIGINT), "Código Empenho"(VARCHAR), "Descrição"(VARCHAR), "Quantidade"(VARCHAR), "Valor Unitário"(VARCHAR), "Valor Total"(VARCHAR)
 
 _despesas_favorecidos (114M):
-  "Código Favorecido"(VARCHAR), "Nome Favorecido"(VARCHAR), "Sigla UF"(VARCHAR), "Nome Município"(VARCHAR), "Código Órgão Superior"(BIGINT), "Nome Órgão Superior"(VARCHAR), "Código Órgão"(BIGINT), "Nome Órgão"(VARCHAR), "Código Unidade Gestora"(BIGINT), "Nome Unidade Gestora"(VARCHAR), "Ano e mês do lançamento"(VARCHAR), "Valor Recebido"(VARCHAR)
+  "Código Favorecido"(VARCHAR), "Nome Favorecido"(VARCHAR), "Sigla UF"(VARCHAR), "Nome Município"(VARCHAR), "Código Órgão Superior"(BIGINT), "Nome Órgão Superior"(VARCHAR), "Código Órgão"(BIGINT), "Nome Órgão"(VARCHAR), "Código Unidade Gestora"(BIGINT), "Nome Unidade Gestora"(VARCHAR), "Ano e mês do lançamento"(VARCHAR formato 'MM/YYYY' ex: '01/2024'), "Valor Recebido"(VARCHAR)
   ATENÇÃO: nesta tabela o campo chama "Nome Favorecido" — nas outras tabelas de despesas chama "Favorecido"
+  Para filtrar por ano 2024: WHERE "Ano e mês do lançamento" LIKE '%/2024'
+  Para filtrar valor: SUM(CAST(REPLACE("Valor Recebido", ',', '.') AS DECIMAL))
 
 -- VIAGENS --
 _viagens_viagem (9M):
@@ -146,6 +163,7 @@ _viagens_passagem (5M):
 
 _viagens_trecho (20M):
   "Identificador do processo de viagem"(VARCHAR), "Número da Proposta (PCDP)"(VARCHAR), "Sequência Trecho"(VARCHAR), "Origem - Data"(VARCHAR), "Origem - País"(VARCHAR), "Origem - UF"(VARCHAR), "Origem - Cidade"(VARCHAR), "Destino - Data"(VARCHAR), "Destino - País"(VARCHAR), "Destino - UF"(VARCHAR), "Destino - Cidade"(VARCHAR), "Meio de transporte"(VARCHAR), "Número Diárias"(VARCHAR), "Missao?"(VARCHAR)
+  ATENÇÃO: NÃO tem coluna de órgão — para filtrar por órgão faça JOIN com _viagens_viagem via "Identificador do processo de viagem"
 
 -- SANÇÕES --
 _ceis (22K): "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL - CADASTRO RECEITA"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR), "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR)
@@ -174,6 +192,7 @@ _emendas (70K): "Código da Emenda"(BIGINT), "Nome Função"(VARCHAR), "Localida
 _emendasparlamentarespordocumento (4M): "Código da Emenda"(VARCHAR), "Ano da Emenda"(BIGINT), "Nome do Autor da Emenda"(VARCHAR), "Número da emenda"(VARCHAR), "Valor Empenhado"(VARCHAR), "Valor Pago"(VARCHAR), "Tipo de Emenda"(VARCHAR), "UF de aplicação do recurso"(VARCHAR), "Favorecido"(VARCHAR), "Fase da despesa"(VARCHAR)
 _transferencias (9M): "ANO / MÊS"(BIGINT YYYYMM), "TIPO TRANSFERÊNCIA"(VARCHAR), "TIPO FAVORECIDO"(VARCHAR), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "NOME ÓRGÃO"(VARCHAR), "CÓDIGO FAVORECIDO"(VARCHAR), "NOME FAVORECIDO"(VARCHAR), "VALOR TRANSFERIDO"(VARCHAR)
 _imoveisfuncionais (23K): "NOME PERMISSIONÁRIO"(VARCHAR), "CPF"(VARCHAR), "CARGO OU FUNÇÃO DE CONFIANÇA"(VARCHAR), "ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO"(VARCHAR), "DATA INÍCIO OCUPAÇÃO"(DATE)
+  ATENÇÃO: NÃO tem coluna UF — para agrupar por estado use "ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO"
 _execuçãodareceita (2M): "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO"(BIGINT), "NOME ÓRGÃO"(VARCHAR), "CÓDIGO UNIDADE GESTORA"(BIGINT), "NOME UNIDADE GESTORA"(VARCHAR), "CATEGORIA ECONÔMICA"(VARCHAR), "ORIGEM RECEITA"(VARCHAR), "ESPÉCIE RECEITA"(VARCHAR), "DETALHAMENTO"(VARCHAR), "VALOR PREVISTO ATUALIZADO"(VARCHAR), "VALOR LANÇADO"(VARCHAR), "VALOR REALIZADO"(VARCHAR), "PERCENTUAL REALIZADO"(VARCHAR), "DATA LANÇAMENTO"(DATE), "ANO EXERCÍCIO"(BIGINT)
 _orçamentodadespesa (305K): "EXERCÍCIO"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "NOME ÓRGÃO SUBORDINADO"(VARCHAR), "NOME FUNÇÃO"(VARCHAR), "NOME PROGRAMA ORÇAMENTÁRIO"(VARCHAR), "NOME AÇÃO"(VARCHAR), "ORÇAMENTO INICIAL (R$)"(VARCHAR), "ORÇAMENTO ATUALIZADO (R$)"(VARCHAR), "ORÇAMENTO EMPENHADO (R$)"(VARCHAR), "ORÇAMENTO REALIZADO (R$)"(VARCHAR)
 _apoiamentoemendasparlamentares (34K): "Código Apoiador"(BIGINT), "Apoiador"(VARCHAR), "Data do Apoio"(TIMESTAMP), "Empenho"(VARCHAR), "Código da Emenda"(BIGINT), "Nome do Autor da Emenda"(VARCHAR), "Valor Empenhado"(VARCHAR), "Valor Pago"(VARCHAR), "Órgão Superior"(VARCHAR)
