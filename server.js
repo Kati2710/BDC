@@ -229,6 +229,13 @@ Responda APENAS com SQL puro — sem explicações, sem markdown, sem blocos de 
     sql = sql.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
     console.log(`📝 SQL: ${sql.substring(0, 300)}`);
 
+    // Se Claude retornou explicação em vez de SQL, devolve direto sem executar
+    const sqlLower = sql.toLowerCase();
+    if (!sqlLower.startsWith("select") && !sqlLower.startsWith("with")) {
+      console.log("💬 Claude respondeu sem SQL (dado não disponível)");
+      return res.json({ answer: sql, sql: "", duration_ms: Date.now() - start, rows_returned: 0 });
+    }
+
     console.log("⚡ Executando...");
     const response = await fetch(`${HETZNER_API}/query_unified`, {
       method: "POST",
