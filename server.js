@@ -35,9 +35,9 @@ _empresas_ms (914K), _empresas_ma (1M), _empresas_pb (881K), _empresas_rn (787K)
 _empresas_al (653K), _empresas_ro (476K), _empresas_to (460K), _empresas_se (457K), _empresas_ex (168K),
 _empresas_ap (150K), _empresas_rr (133K), _empresas_ac (157K)
 Colunas: cnpj_basico (8 dígitos), razao_social, porte, capital_social, est (STRUCT)
-  est contém: est.uf, est.municipio, est.situacao_cadastral, est.bairro, est.cep, est.cnpj_completo
-Para buscar por UF específica: WHERE est.uf = 'SP'
-Para cruzar com PT via CNPJ: SUBSTRING("CNPJ DO SANCIONADO", 1, 8) = cnpj_basico
+  est contém: est.uf, est.municipio, est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'), est.bairro, est.cep, est.cnpj_completo, est.cnae_principal, est.data_inicio_atividade, est.nome_fantasia
+Para buscar empresas ativas: WHERE est.situacao_cadastral = 'ATIVA' (NUNCA use código numérico como '02')
+Para buscar por UF: WHERE est.uf = 'SP'
 
 == SERVIDORES PÚBLICOS FEDERAIS ==
 _servidores_cadastro (18.7M): Id_SERVIDOR_PORTAL, NOME, CPF, MATRICULA, DESCRICAO_CARGO, CLASSE_CARGO, REFERENCIA_CARGO, PADRAO_CARGO, NIVEL_CARGO, SIGLA_FUNCAO, NIVEL_FUNCAO, FUNCAO, CODIGO_ATIVIDADE, ATIVIDADE, OPCAO_PARCIAL, COD_UORG_LOTACAO, UORG_LOTACAO, COD_ORG_LOTACAO, ORG_LOTACAO, COD_ORGSUP_LOTACAO, ORGSUP_LOTACAO, COD_UORG_EXERCICIO, UORG_EXERCICIO, COD_ORG_EXERCICIO, ORG_EXERCICIO, COD_ORGSUP_EXERCICIO, ORGSUP_EXERCICIO, COD_TIPO_VINCULO, TIPO_VINCULO, SITUACAO_VINCULO, DATA_INICIO_AFASTAMENTO, DATA_TERMINO_AFASTAMENTO
