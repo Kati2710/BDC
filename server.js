@@ -79,7 +79,8 @@ Todas com: cnpj_basico(VARCHAR 8 dígitos), razao_social(VARCHAR), porte(VARCHAR
 est campos: est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'), est.municipio, est.uf,
             est.cnpj_completo, est.cnae_principal, est.cnae_principal_codigo,
             est.cnaes_secundarios_codigos(VARCHAR[]), est.cnaes_secundarios_descricoes(VARCHAR[]),
-            est.data_inicio_atividade, est.data_situacao_cadastral, est.nome_fantasia,
+            est.data_inicio_atividade(VARCHAR formato 'YYYYMMDD' — para filtrar por ano use: est.data_inicio_atividade LIKE '2024%'),
+            est.data_situacao_cadastral(VARCHAR), est.nome_fantasia,
             est.matriz_filial, est.motivo_situacao, est.cep, est.bairro, est.logradouro,
             est.numero, est.telefone_1, est.correio_eletronico
 
@@ -94,6 +95,7 @@ _servidores_cadastro__7 (52M — militares): mesmo schema que _servidores_cadast
 _servidores_remuneracao (19M):
   ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), "REMUNERAÇÃO BÁSICA BRUTA (R$)"(VARCHAR), "REMUNERAÇÃO BÁSICA BRUTA (U$)"(VARCHAR), "ABATE-TETO (R$)"(VARCHAR), "GRATIFICAÇÃO NATALINA (R$)"(VARCHAR), "FÉRIAS (R$)"(VARCHAR), "OUTRAS REMUNERAÇÕES EVENTUAIS (R$)"(VARCHAR), "IRRF (R$)"(VARCHAR), "PSS/RPGS (R$)"(VARCHAR), "DEMAIS DEDUÇÕES (R$)"(VARCHAR), "PENSÃO MILITAR (R$)"(VARCHAR), "FUNDO DE SAÚDE (R$)"(VARCHAR), "REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)"(VARCHAR), "TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"(VARCHAR)
   ANO e MES são VARCHAR: WHERE ANO = '2024' AND MES = '01'
+  ATENÇÃO: _servidores_remuneracao NÃO tem coluna de órgão. Para média por órgão, faça JOIN com _servidores_cadastro via Id_SERVIDOR_PORTAL e use ORGSUP_EXERCICIO ou ORG_EXERCICIO do cadastro.
 _servidores_remuneracao__2(30M), __3(52M), __4(237K), __5(9M) — mesmo schema
 
 _servidores_afastamentos (84K): ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), DATA_INICIO_AFASTAMENTO(VARCHAR), DATA_FIM_AFASTAMENTO(VARCHAR)
