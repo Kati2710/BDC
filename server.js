@@ -18,9 +18,9 @@ BANCO: brazildatacorp.duckdb | 5 bilhões de linhas | 475 tabelas | Motor: DuckD
 - Remuneração de magistrados, ministros do STF/STJ não está disponível
 - Dados de municípios e estados (servidores estaduais/municipais) NÃO estão nos dados
 - Abono permanência não tem coluna dedicada — não é possível calcular com precisão
-- Convênios: o campo SITUAÇÃO CONVÊNIO usa valores como 'Adimplente', 'Inadimplente', 'Rescindido' — NÃO use 'Vigente' ou 'Ativo'
+- Convênios: SITUAÇÃO CONVÊNIO valores reais: 'EM EXECUÇÃO', 'EXCLUÍDO', 'PRESTAÇÃO DE CONTAS ENVIADA PARA ANÁLISE', 'PRESTAÇÃO DE CONTAS EM COMPLEMENTAÇÃO', 'RESCINDIDO', 'BAIXADO', 'CANCELADO', 'PRESTAÇÃO DE CONTAS REJEITADA' — NÃO use 'Vigente', 'Ativo', 'Adimplente'
 - Empresas: não é possível identificar MEI com precisão — use porte = 'MICRO EMPRESA' como aproximação
-- Servidores do Executivo cobrem até dez/2024 — dados de 2025 podem estar incompletos
+- CPF no Bolsa Família e BPC é mascarado (ex: '***123456**') — NÃO é possível cruzar com CPF da Receita Federal ou PEP diretamente por CPF
 
 == COMPORTAMENTO OBRIGATÓRIO ==
 Antes de gerar qualquer SQL, avalie se os dados necessários existem no catálogo abaixo.
@@ -48,6 +48,7 @@ Antes de gerar qualquer SQL, avalie se os dados necessários existem no catálog
 7. LIMIT 100 em queries de listagem; sem LIMIT em COUNT/SUM/agregações
 8. CTEs (WITH): não aplique REPLACE/CAST em colunas já computadas como DECIMAL dentro da CTE — use a coluna diretamente: AVG(coluna_decimal), não AVG(CAST(REPLACE(coluna_decimal,...)))
 9. Sempre use aspas duplas em nomes de colunas com espaços, acentos ou parênteses
+10. UNION/UNION ALL: NUNCA use ORDER BY dentro de subqueries de UNION. Coloque o ORDER BY apenas no final da query completa, fora do UNION. Para ordenar com CASE em UNION, envolva tudo em uma CTE: WITH resultado AS (SELECT ... UNION ALL SELECT ...) SELECT * FROM resultado ORDER BY CASE...
 8. Aspas duplas obrigatórias em colunas com espaços/acentos/parênteses
 
 == TABELAS ==
@@ -105,12 +106,17 @@ est campos: est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'
             est.correio_eletronico, est.pais, est.pais_codigo, est.cidade_exterior
 
 -- SERVIDORES --
-_servidores_cadastro (19M — civis ativos):
+_servidores_cadastro (19M — civis):
   Id_SERVIDOR_PORTAL(VARCHAR), NOME(VARCHAR), CPF(VARCHAR), MATRICULA(VARCHAR), DESCRICAO_CARGO(VARCHAR), CLASSE_CARGO(VARCHAR), NIVEL_CARGO(VARCHAR), FUNCAO(VARCHAR), COD_UORG_LOTACAO(VARCHAR), UORG_LOTACAO(VARCHAR), COD_ORG_LOTACAO(VARCHAR), ORG_LOTACAO(VARCHAR), COD_ORGSUP_LOTACAO(VARCHAR), ORGSUP_LOTACAO(VARCHAR), COD_ORG_EXERCICIO(VARCHAR), ORG_EXERCICIO(VARCHAR), COD_ORGSUP_EXERCICIO(VARCHAR), ORGSUP_EXERCICIO(VARCHAR), TIPO_VINCULO(VARCHAR), SITUACAO_VINCULO(VARCHAR), REGIME_JURIDICO(VARCHAR), JORNADA_DE_TRABALHO(VARCHAR), DATA_INGRESSO_ORGAO(VARCHAR), UF_EXERCICIO(VARCHAR)
-_servidores_cadastro__2(593K), __3(793K), __6(1M) — mesmo schema
-_servidores_cadastro__4 (73K — pensionistas): Id_SERVIDOR_PORTAL, NOME, CPF, CPF_REPRESENTANTE_LEGAL, NOME_REPRESENTANTE_LEGAL, CPF_INSTITUIDOR_PENSAO, NOME_INSTITUIDOR_PENSAO, TIPO_PENSAO, DATA_INICIO_PENSAO, ORG_LOTACAO_INSTITUIDOR_PENSAO
-_servidores_cadastro__5 (12M — aposentados): Id_SERVIDOR_PORTAL, NOME, CPF, MATRICULA, TIPO_APOSENTADORIA, DATA_APOSENTADORIA, DESCRICAO_CARGO, UORG_LOTACAO, ORG_LOTACAO, ORGSUP_LOTACAO, TIPO_VINCULO, SITUACAO_VINCULO
-_servidores_cadastro__7 (52M — militares): mesmo schema que _servidores_cadastro
+  SITUACAO_VINCULO valores: 'ATIVO PERMANENTE', 'SEM VINCULO', 'ATIVO - DEC. JUDIC', 'EM DISPONIBILIDADE', 'EXCEDENTE A LOTACAO', 'CONTRATO TEMPORARIO', 'NOMEADO CARGO COMIS.' — NUNCA use 'ATIVO' simples
+_servidores_cadastro__2 (593K): mesmo schema — SITUACAO_VINCULO: 'ATIVO PERMANENTE', 'ATIVO EM OUTRO ORGAO', 'CELETISTA', 'MILITAR DA ATIVA', 'NATUREZA ESPECIAL'
+_servidores_cadastro__3 (793K): mesmo schema — SITUACAO_VINCULO: 'ATIVO PERMANENTE', 'CONT.PROF.SUBSTITUTO', 'SEM VINCULO', 'NATUREZA ESPECIAL'
+_servidores_cadastro__4 (73K — pensionistas): Id_SERVIDOR_PORTAL, NOME, CPF, CPF_REPRESENTANTE_LEGAL, NOME_REPRESENTANTE_LEGAL, CPF_INSTITUIDOR_PENSAO, NOME_INSTITUIDOR_PENSAO, TIPO_PENSAO, DATA_INICIO_PENSAO, ORG_LOTACAO_INSTITUIDOR_PENSAO — SITUACAO_VINCULO: 'PENSIONISTA'
+_servidores_cadastro__5 (12M — militares reserva/reforma): Id_SERVIDOR_PORTAL, NOME, CPF, MATRICULA, TIPO_APOSENTADORIA valores: 'RESERVA', 'REFORMA', 'REFORMA POR INVALIDEZ', 'REFORMA POR DOENÇA', DATA_APOSENTADORIA, DESCRICAO_CARGO, UORG_LOTACAO, ORG_LOTACAO, ORGSUP_LOTACAO, TIPO_VINCULO, SITUACAO_VINCULO valores: 'MILITAR REFORMADO', 'MILITAR DA RESERVA'
+_servidores_cadastro__6 (1M): mesmo schema que __1 — SITUACAO_VINCULO: 'EXCEDENTE A LOTACAO', 'SEM VINCULO', 'ATIVO - DEC. JUDIC'
+_servidores_cadastro__7 (52M — militares ativos): mesmo schema — SITUACAO_VINCULO: 'CEDIDO SUS/LEI 8270', 'CELETISTA/EMPREGADO', 'EMPREGO PUBLICO', 'APOSENTADO TEMPORARI'
+  Para civis ativos use: SITUACAO_VINCULO = 'ATIVO PERMANENTE' (em __1 ou __2)
+  Para militares ativos use: tabela __7 com SITUACAO_VINCULO IN ('CEDIDO SUS/LEI 8270','CELETISTA/EMPREGADO'...) ou MILITAR DA ATIVA em __2
 
 _servidores_remuneracao (19M):
   ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), "REMUNERAÇÃO BÁSICA BRUTA (R$)"(VARCHAR), "REMUNERAÇÃO BÁSICA BRUTA (U$)"(VARCHAR), "ABATE-TETO (R$)"(VARCHAR), "GRATIFICAÇÃO NATALINA (R$)"(VARCHAR), "FÉRIAS (R$)"(VARCHAR), "OUTRAS REMUNERAÇÕES EVENTUAIS (R$)"(VARCHAR), "IRRF (R$)"(VARCHAR), "PSS/RPGS (R$)"(VARCHAR), "DEMAIS DEDUÇÕES (R$)"(VARCHAR), "PENSÃO MILITAR (R$)"(VARCHAR), "FUNDO DE SAÚDE (R$)"(VARCHAR), "REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)"(VARCHAR), "TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"(VARCHAR)
@@ -166,16 +172,16 @@ _viagens_trecho (20M):
   ATENÇÃO: NÃO tem coluna de órgão — para filtrar por órgão faça JOIN com _viagens_viagem via "Identificador do processo de viagem"
 
 -- SANÇÕES --
-_ceis (22K): "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL - CADASTRO RECEITA"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR), "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR)
-_cnep (2K): mesmo schema + "VALOR DA MULTA"(VARCHAR)
+_ceis (22K): "TIPO DE PESSOA"(VARCHAR) 'F'=física 'J'=jurídica, "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL - CADASTRO RECEITA"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR) valores: 'Declaração de Inidoneidade sem prazo determinado', 'Impedimento/proibição de contratar sem prazo determinado', 'Demissão', 'Multa', 'Impedimento/proibição de contratar com prazo determinado', 'Suspensão', "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR)
+_cnep (2K): mesmo schema + "VALOR DA MULTA"(VARCHAR), CATEGORIA DA SANÇÃO valores: 'Perdimento de bens', 'Multa', 'Dissolução compulsória da PJ', 'Proibição de receber incentivos', 'Suspensão/Interdição das atividades com prazo determinado'
 _cepim (4K): "CNPJ ENTIDADE"(VARCHAR), "NOME ENTIDADE"(VARCHAR), "NÚMERO CONVÊNIO"(VARCHAR), "ÓRGÃO CONCEDENTE"(VARCHAR), "MOTIVO DO IMPEDIMENTO"(VARCHAR)
-_ceaf (4K): "CADASTRO"(VARCHAR), "CÓDIGO DA SANÇÃO"(BIGINT), "TIPO DE PESSOA"(BOOLEAN), "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR), "NÚMERO DO DOCUMENTO"(VARCHAR), "NÚMERO DO PROCESSO"(VARCHAR), "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "DATA PUBLICAÇÃO"(DATE), "DATA DO TRÂNSITO EM JULGADO"(DATE), "ABRAGÊNCIA DA SANÇÃO"(VARCHAR), "CARGO EFETIVO"(VARCHAR), "FUNÇÃO OU CARGO DE CONFIANÇA"(VARCHAR), "ÓRGÃO DE LOTAÇÃO"(VARCHAR), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR), "FUNDAMENTAÇÃO LEGAL"(VARCHAR)
-_acordos (143): "ID DO ACORDO"(BIGINT), "CNPJ DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL – CADASTRO RECEITA"(VARCHAR), "SITUAÇÃO DO ACORDO DE LENIÊNICA"(VARCHAR), "DATA DE INÍCIO DO ACORDO"(DATE), "DATA DE FIM DO ACORDO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR)
+_ceaf (4K): "TIPO DE PESSOA"(BOOLEAN), "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR) valores: 'Perda de Emprego/Cargo/Função Pública', 'Cassação de aposentadoria', 'Destituição', 'Destituição de Cargo em Comissão', 'Demissão', "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR)
+_acordos (143): "ID DO ACORDO"(BIGINT), "CNPJ DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL – CADASTRO RECEITA"(VARCHAR), "SITUAÇÃO DO ACORDO DE LENIÊNICA"(VARCHAR) valores: 'Cumprido', 'Em Execução', "DATA DE INÍCIO DO ACORDO"(DATE), "DATA DE FIM DO ACORDO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "NÚMERO DO PROCESSO"(VARCHAR), "TERMOS DO ACORDO"(VARCHAR)
 
 -- LICITAÇÕES E COMPRAS --
 _licitacoes (2M): "Número Licitação"(VARCHAR), "Código UG"(VARCHAR), "Nome UG"(VARCHAR), "Código Modalidade Compra"(BIGINT), "Modalidade Compra"(VARCHAR), "Número Processo"(VARCHAR), "Objeto"(VARCHAR), "Situação Licitação"(VARCHAR), "Nome Órgão Superior"(VARCHAR), "Nome Órgão"(VARCHAR), "UF"(VARCHAR), "Município"(VARCHAR), "Data Resultado Compra"(DATE), "Data Abertura"(DATE), "Valor Licitação"(VARCHAR)
 _compras (4M): "Código Órgão"(BIGINT), "Nome Órgão"(VARCHAR), "Código UG"(VARCHAR), "Nome UG"(VARCHAR), "Número Contrato"(VARCHAR), "Descrição Item Compra"(VARCHAR), "Quantidade Item"(BIGINT), "Valor Item"(VARCHAR)
-_convenios (612K): "NÚMERO CONVÊNIO"(VARCHAR), "UF"(VARCHAR), "CÓDIGO SIAFI MUNICÍPIO"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "SITUAÇÃO CONVÊNIO"(VARCHAR), "NÚMERO ORIGINAL"(VARCHAR), "NÚMERO PROCESSO DO CONVÊNIO"(VARCHAR), "OBJETO DO CONVÊNIO"(VARCHAR), "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO CONCEDENTE"(BIGINT), "NOME ÓRGÃO CONCEDENTE"(VARCHAR), "CÓDIGO UG CONCEDENTE"(BIGINT), "NOME UG CONCEDENTE"(VARCHAR), "CÓDIGO CONVENENTE"(VARCHAR), "TIPO CONVENENTE"(VARCHAR), "NOME CONVENENTE"(VARCHAR), "TIPO ENTE CONVENENTE"(VARCHAR), "TIPO INSTRUMENTO"(VARCHAR), "VALOR CONVÊNIO"(VARCHAR), "VALOR LIBERADO"(VARCHAR), "DATA PUBLICAÇÃO"(DATE), "DATA INÍCIO VIGÊNCIA"(DATE), "DATA FINAL VIGÊNCIA"(DATE), "VALOR CONTRAPARTIDA"(VARCHAR), "DATA ÚLTIMA LIBERAÇÃO"(DATE), "VALOR ÚLTIMA LIBERAÇÃO"(VARCHAR)
+_convenios (612K): "NÚMERO CONVÊNIO"(VARCHAR), "UF"(VARCHAR), "CÓDIGO SIAFI MUNICÍPIO"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "SITUAÇÃO CONVÊNIO"(VARCHAR) valores: 'EM EXECUÇÃO', 'EXCLUÍDO', 'PRESTAÇÃO DE CONTAS ENVIADA PARA ANÁLISE', 'PRESTAÇÃO DE CONTAS EM COMPLEMENTAÇÃO', 'RESCINDIDO', 'BAIXADO', 'CANCELADO', 'PRESTAÇÃO DE CONTAS REJEITADA', "NÚMERO ORIGINAL"(VARCHAR), "NÚMERO PROCESSO DO CONVÊNIO"(VARCHAR), "OBJETO DO CONVÊNIO"(VARCHAR), "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO CONCEDENTE"(BIGINT), "NOME ÓRGÃO CONCEDENTE"(VARCHAR), "CÓDIGO UG CONCEDENTE"(BIGINT), "NOME UG CONCEDENTE"(VARCHAR), "CÓDIGO CONVENENTE"(VARCHAR), "TIPO CONVENENTE"(VARCHAR) valores: 'Administração Pública', 'Organizações Internacionais', 'Entidades Empresariais Privadas', 'Entidades Sem Fins Lucrativos', 'Administração Pública Estadual ou do Distrito Federal', 'Administração Pública Municipal', 'Pessoa Física', "NOME CONVENENTE"(VARCHAR), "TIPO INSTRUMENTO"(VARCHAR), "VALOR CONVÊNIO"(VARCHAR), "VALOR LIBERADO"(VARCHAR), "DATA PUBLICAÇÃO"(DATE), "DATA INÍCIO VIGÊNCIA"(DATE), "DATA FINAL VIGÊNCIA"(DATE), "VALOR CONTRAPARTIDA"(VARCHAR), "DATA ÚLTIMA LIBERAÇÃO"(DATE), "VALOR ÚLTIMA LIBERAÇÃO"(VARCHAR)
 
 _notasfiscais (274K): "CHAVE DE ACESSO"(DOUBLE), "MODELO"(VARCHAR), "SÉRIE"(BIGINT), "NÚMERO"(BIGINT), "NATUREZA DA OPERAÇÃO"(VARCHAR), "DATA EMISSÃO"(TIMESTAMP), "EVENTO"(VARCHAR), "DATA/HORA EVENTO"(TIMESTAMP), "DESCRIÇÃO EVENTO"(VARCHAR), "MOTIVO EVENTO"(VARCHAR)
 _favorecidospj (81): "COD_NATJURIDICA"(BIGINT), "DESC_NATJURIDICA"(VARCHAR), "COD_TIPO_NATJURIDICA"(BIGINT), "DESC_TIPO_NATJURIDICA"(VARCHAR)
