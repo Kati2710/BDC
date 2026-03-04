@@ -89,13 +89,17 @@ _execuçãodareceita (1.7M): "CÓDIGO ÓRGÃO", "NOME ÓRGÃO", "CATEGORIA ECON�
 _notasfiscais (273K): "CHAVE DE ACESSO", "NÚMERO", "NATUREZA DA OPERAÇÃO", "DATA EMISSÃO", "CNPJ EMITENTE", "NOME EMITENTE", "VALOR TOTAL"
 
 == REGRAS IMPORTANTES ==
-1. Todas as colunas são VARCHAR — use CAST para somar: CAST("VALOR PARCELA" AS DECIMAL)
-2. Valores monetários têm vírgula decimal: use REPLACE("VALOR", ',', '.') antes de CAST
+1. Todas as colunas são VARCHAR — use CAST quando precisar de número.
+2. Valores monetários têm vírgula decimal: CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL)
 3. Para empresas RFB: acesse campos aninhados com est.uf, est.municipio, est.situacao_cadastral
-4. Para cruzar beneficiários com empresas: SUBSTRING(CPF, 1, 11) ou CNPJ com cnpj_basico (8 dígitos)
+4. Para cruzar com CNPJ: SUBSTRING(CAST("CNPJ" AS VARCHAR), 1, 8) = cnpj_basico
 5. Sempre use LIMIT 100 salvo pedido explícito de agregação
-6. Datas no formato YYYYMM (ex: 202401) ou DD/MM/YYYY
+6. "MÊS COMPETÊNCIA" e "MÊS REFERÊNCIA" estão no formato YYYYMM (ex: 202401 = janeiro/2024).
+   Para filtrar por ano: WHERE "MÊS COMPETÊNCIA" LIKE '2024%'
+   Para filtrar por mês específico: WHERE "MÊS COMPETÊNCIA" = '202401'
+   NUNCA use SUBSTRING ou funções numéricas nessas colunas — elas são VARCHAR.
 7. Para servidores com múltiplas tabelas __2, __3 etc — use UNION ALL se precisar do histórico completo
+8. NUNCA use SUBSTRING em colunas que podem ser numéricas. Use LIKE ou CAST(...AS VARCHAR) primeiro.
 `;
 
 /* ========================= MAIN HANDLER ========================= */
