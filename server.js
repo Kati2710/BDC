@@ -1,4 +1,4 @@
-// server.js — BDC V6 (corrigido p/ regressão) — DuckDB SQL + AutoFix robusto
+// server.js — BDC V6 (corrigido / HARDENED) — DuckDB SQL + AutoFix robusto
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
@@ -47,15 +47,29 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - Abono permanência: sem coluna dedicada
 
 == TABELAS ==
-(… seu catálogo completo continua igual ao que você já colou …)
+(… mantenha seu catálogo completo aqui, como já está no seu arquivo …)
 `;
 
 /* ========================= SQL AUTO-FIX (V6 HARDENED) ========================= */
 function applySqlAutoFix(sql) {
   let s = sql || "";
 
-  // Normaliza lixo de markdown
+  // Normaliza markdown / lixo comum
   s = s.replace(/```sql\s*/gi, "").replace(/```/g, "").trim();
+
+  /* 0) FIX CRÍTICO: CAST(REPLACE(REPLACE(REPLACE(... ) AS DECIMAL)) -> CAST(REPLACE(REPLACE(...)) AS DECIMAL) */
+
+  // Caso geral (captura o "AS DECIMAL" no lugar errado)
+  s = s.replace(
+    /CAST\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([^)]+?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)\s*\)/gi,
+    "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
+  );
+
+  // Variante com identificador mais complexo/aspas
+  s = s.replace(
+    /CAST\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*("[^"]+"(?:\."[^"]+")?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)\s*\)/gi,
+    "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
+  );
 
   /* 1) COLUNAS INVENTADAS / NOMES ERRADOS */
   s = s.replace(/"Início do afastamento"/g, "DATA_INICIO_AFASTAMENTO");
@@ -72,7 +86,6 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
 
   /* 2) VIAGENS: ANO EM VARCHAR (evita SUBSTRING errado + EXTRACT/DATE_PART em VARCHAR) */
-  // SUBSTRING(col,7,4) -> SUBSTRING(col,1,4) para colunas de período
   s = s.replace(
     /SUBSTRING\(\s*("[^"]+"\."Período - Data de início"|"Período - Data de início")\s*,\s*7\s*,\s*4\s*\)/g,
     "SUBSTRING($1, 1, 4)"
@@ -82,7 +95,6 @@ function applySqlAutoFix(sql) {
     "SUBSTRING($1, 1, 4)"
   );
 
-  // EXTRACT(YEAR FROM "Período - Data de início") -> CAST(SUBSTRING(...,1,4) AS BIGINT)
   s = s.replace(
     /EXTRACT\s*\(\s*YEAR\s+FROM\s+("Período - Data de início")\s*\)/gi,
     "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
@@ -92,7 +104,6 @@ function applySqlAutoFix(sql) {
     "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
   );
 
-  // date_part('year', "Período - Data de início") -> substring
   s = s.replace(
     /date_part\s*\(\s*'year'\s*,\s*("Período - Data de início")\s*\)/gi,
     "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
@@ -108,8 +119,7 @@ function applySqlAutoFix(sql) {
     "REPLACE(REPLACE($1,'.',''),',','.')"
   );
 
-  // Padrão (quase sempre) correto para valores comuns (sem forçar quando já está ok)
-  // Corrige CAST(REPLACE(col,'.',''),',','.') AS DECIMAL  -> CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
+  // CAST(REPLACE(col,'.',''),',','.') AS DECIMAL  -> CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
   s = s.replace(
     /CAST\(\s*REPLACE\(\s*([^,]+)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)/gi,
     "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
@@ -124,7 +134,7 @@ function applySqlAutoFix(sql) {
   /* 5) PENSIONISTAS: coluna inexistente */
   s = s.replace(/\bORGSUP_LOTACAO\b/g, "ORGSUP_LOTACAO_INSTITUIDOR_PENSAO");
 
-  /* 6) UNION: remove ORDER BY antes de UNION (DuckDB não deixa em subselect/CTE de union do jeito que Claude faz) */
+  /* 6) UNION: remove ORDER BY antes de UNION */
   s = s.replace(/ORDER BY[\s\S]*?(?=\s+UNION\s+ALL|\s+UNION\s+)/gi, "");
 
   /* 7) CEPIM x CONVÊNIOS: evita coluna inventada no _convenios */
@@ -192,11 +202,10 @@ REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, 
       signal: AbortSignal.timeout(240000),
     });
 
-    // Se a API falhar sem JSON, captura texto
     let data;
     try {
       data = await response.json();
-    } catch (e) {
+    } catch {
       const txt = await response.text().catch(() => "");
       throw new Error(txt || `Query falhou (HTTP ${response.status})`);
     }
