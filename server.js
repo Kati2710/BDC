@@ -11,202 +11,115 @@ const HETZNER_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura"
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const DB_CATALOG = `
-BANCO: brazildatacorp.duckdb | 5 bilhões de linhas | 475 tabelas | Motor: DuckDB
+BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 
-== LIMITAÇÕES CONHECIDAS — RESPONDA DIRETAMENTE SEM TENTAR GERAR SQL ==
-- Servidores do Judiciário (STJ, STF, TRF, TRT) e Legislativo (Câmara, Senado) NÃO estão nos dados — apenas Poder Executivo Federal
-- Remuneração de magistrados, ministros do STF/STJ não está disponível
-- Dados de municípios e estados (servidores estaduais/municipais) NÃO estão nos dados
-- Abono permanência não tem coluna dedicada — não é possível calcular com precisão
-- Convênios: SITUAÇÃO CONVÊNIO valores reais: 'EM EXECUÇÃO', 'EXCLUÍDO', 'PRESTAÇÃO DE CONTAS ENVIADA PARA ANÁLISE', 'PRESTAÇÃO DE CONTAS EM COMPLEMENTAÇÃO', 'RESCINDIDO', 'BAIXADO', 'CANCELADO', 'PRESTAÇÃO DE CONTAS REJEITADA' — NÃO use 'Vigente', 'Ativo', 'Adimplente'
-- Empresas: não é possível identificar MEI com precisão — use porte = 'MICRO EMPRESA' como aproximação
-- CPF no Bolsa Família e BPC é mascarado (ex: '***123456**') — NÃO é possível cruzar com CPF da Receita Federal ou PEP diretamente por CPF
+== REGRAS SQL ==
+- BIGINT: só operadores numéricos. VARCHAR: LIKE/=. STRUCT: ponto (est.uf). Aspas duplas em colunas com espaços/acentos.
+- DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412. NUNCA divida por 100.
+- VALORES monetários são VARCHAR: SUM(CAST(REPLACE("VALOR PARCELA",',','.') AS DECIMAL))
+- LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
+- CTEs: não aplique CAST/REPLACE em colunas já computadas como DECIMAL
+- UNION/UNION ALL: ORDER BY só no final, nunca dentro de subquery
+- BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
+- SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
 
-== COMPORTAMENTO OBRIGATÓRIO ==
-Antes de gerar qualquer SQL, avalie se os dados necessários existem no catálogo abaixo.
-- Se existem: gere o SQL e execute.
-- Se NÃO existem ou são insuficientes: responda diretamente em português explicando o que não está disponível e por quê. NÃO tente gerar SQL que vai retornar zero ou erro.
-- Se o resultado for zero/vazio e isso for inesperado: explique que o dado pode não estar disponível ou que o campo não contém essa informação, em vez de inventar explicações técnicas.
-
-
-1. TIPOS reais — respeite ao filtrar:
-   - BIGINT: operadores numéricos (=, >, <, /) — NUNCA use LIKE ou SUBSTRING em BIGINT
-   - VARCHAR: pode usar LIKE, SUBSTRING, =
-   - DATE: comparação direta com strings '2024-01-01' ou funções YEAR(), MONTH()
-   - DOUBLE: aritmética normal
-   - STRUCT: acesse campos com ponto — est.situacao_cadastral, est.municipio, est.uf
-2. DATAS YYYYMM (MÊS COMPETÊNCIA, MÊS REFERÊNCIA, MÊS DISPONIBILIZAÇÃO, ANO / MÊS) são BIGINT:
-   - Filtrar por ano: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412
-   - Filtrar por mês: WHERE "MÊS COMPETÊNCIA" = 202401
-   - NUNCA use / 100 = 2024 — retorna sempre zero por causa de precisão inteira
-3. VALORES MONETÁRIOS são VARCHAR com vírgula: SUM(CAST(REPLACE("VALOR PARCELA", ',', '.') AS DECIMAL))
-4. EMPRESAS RFB — coluna est é STRUCT:
-   - est.situacao_cadastral: 'ATIVA', 'BAIXADA', 'INAPTA', 'SUSPENSA', 'NULA'
-   - NUNCA use código como '02' — use texto 'ATIVA'
-5. BOLSA FAMÍLIA: até 2021 → _bolsafamilia_pagamentos; 2022-2025 → _novobolsafamilia
-6. SERVIDORES — ANO e MES são VARCHAR: WHERE ANO = '2024' AND MES = '01'
-7. LIMIT 100 em queries de listagem; sem LIMIT em COUNT/SUM/agregações
-8. CTEs (WITH): não aplique REPLACE/CAST em colunas já computadas como DECIMAL dentro da CTE — use a coluna diretamente: AVG(coluna_decimal), não AVG(CAST(REPLACE(coluna_decimal,...)))
-9. Sempre use aspas duplas em nomes de colunas com espaços, acentos ou parênteses
-10. UNION/UNION ALL: NUNCA use ORDER BY dentro de subqueries de UNION. Coloque o ORDER BY apenas no final da query completa, fora do UNION. Para ordenar com CASE em UNION, envolva tudo em uma CTE: WITH resultado AS (SELECT ... UNION ALL SELECT ...) SELECT * FROM resultado ORDER BY CASE...
-8. Aspas duplas obrigatórias em colunas com espaços/acentos/parênteses
+== LIMITAÇÕES — RESPONDA SEM SQL SE PERGUNTAR SOBRE ==
+- Judiciário (STF,STJ,TRF,TRT), Legislativo (Câmara,Senado): não estão nos dados
+- Servidores estaduais/municipais: não estão nos dados
+- CPF no BF/BPC é mascarado (***123456**): não cruza com RFB/PEP por CPF
+- MEI não é identificável: use porte='MICRO EMPRESA' como aproximação
+- Abono permanência: sem coluna dedicada
 
 == TABELAS ==
 
-_bolsafamilia_pagamentos (1.4B — até 2021):
-  "MÊS COMPETÊNCIA"(BIGINT), "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "CPF FAVORECIDO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "VALOR PARCELA"(VARCHAR)
+-- PROGRAMAS SOCIAIS --
+Schema base (UF,MUNICÍPIO,CPF/NIS,NOME,VALOR_PARCELA,MÊS*BIGINT):
+_bolsafamilia_pagamentos(1.4B,até2021): +MÊS REFERÊNCIA
+_bolsafamilia_saques(478M,até2021): +DATA SAQUE(DATE)
+_novobolsafamilia(668M,2022-2025): schema base
+_auxiliobrasil(280M): schema base
+_bpc(300M): NIS/CPF BENEFICIÁRIO, +NIS/CPF REPRESENTANTE LEGAL, "NÚMERO BENEFÍCIO"(BIGINT), "BENEFÍCIO CONCEDIDO JUDICIALMENTE"
+_auxilioemergencial(782M): "MÊS DISPONIBILIZAÇÃO"(BIGINT), NIS/CPF BENEFICIÁRIO+RESPONSÁVEL, ENQUADRAMENTO, PARCELA, "VALOR BENEFÍCIO"
+_segurodefeso(40M): +RGP FAVORECIDO
+_garantiasafra(33M): sem CPF, só NIS
+_pedemeia(37M): +"CÓDIGO ETAPA ENSINO"(BIGINT),"ETAPA ENSINO","TIPO INCENTIVO","DATA DO PAGAMENTO"(DATE)
+_peti(803K): +"SITUAÇÃO BENEFÍCIO"
+_auxilioreconstrucao(425K): +"QUANTIDADE DE PESSOAS NA FAMÍLIA"(BIGINT),"DATA EFETIVAÇÃO PARCELA"(DATE)
 
-_bolsafamilia_saques (478M — até 2021):
-  "MÊS COMPETÊNCIA"(BIGINT), "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "CPF FAVORECIDO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "DATA SAQUE"(DATE), "VALOR PARCELA"(VARCHAR)
-
-_novobolsafamilia (668M — 2022 a 2025):
-  "MÊS COMPETÊNCIA"(BIGINT), "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "CPF FAVORECIDO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "VALOR PARCELA"(VARCHAR)
-
-_auxilioemergencial (782M):
-  "MÊS DISPONIBILIZAÇÃO"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO IBGE"(BIGINT), "NOME MUNICÍPIO"(VARCHAR), "NIS BENEFICIÁRIO"(VARCHAR), "CPF BENEFICIÁRIO"(VARCHAR), "NOME BENEFICIÁRIO"(VARCHAR), "NIS RESPONSÁVEL"(BIGINT), "CPF RESPONSÁVEL"(VARCHAR), "NOME RESPONSÁVEL"(VARCHAR), "ENQUADRAMENTO"(VARCHAR), "PARCELA"(VARCHAR), "OBSERVAÇÃO"(VARCHAR), "VALOR BENEFÍCIO"(VARCHAR)
-
-_auxiliobrasil (280M):
-  "MÊS COMPETÊNCIA"(BIGINT), "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "CPF FAVORECIDO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "VALOR PARCELA"(VARCHAR)
-
-_bpc (300M):
-  "MÊS COMPETÊNCIA"(BIGINT), "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "NIS BENEFICIÁRIO"(BIGINT), "CPF BENEFICIÁRIO"(VARCHAR), "NOME BENEFICIÁRIO"(VARCHAR), "NIS REPRESENTANTE LEGAL"(BIGINT), "CPF REPRESENTANTE LEGAL"(VARCHAR), "NOME REPRESENTANTE LEGAL"(VARCHAR), "NÚMERO BENEFÍCIO"(BIGINT), "BENEFÍCIO CONCEDIDO JUDICIALMENTE"(VARCHAR), "VALOR PARCELA"(VARCHAR)
-
-_segurodefeso (40M):
-  "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "CPF FAVORECIDO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "RGP FAVORECIDO"(VARCHAR), "NOME FAVORECIDO"(VARCHAR), "VALOR PARCELA"(VARCHAR)
-
-_garantiasafra (33M):
-  "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "VALOR PARCELA"(VARCHAR)
-
-_pedemeia (37M):
-  "MÊS FOLHA"(BIGINT), "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "NIS BENEFICIÁRIO"(BIGINT), "CPF BENEFICIÁRIO"(VARCHAR), "NOME BENEFICIÁRIO"(VARCHAR), "CÓDIGO ETAPA ENSINO"(BIGINT), "ETAPA ENSINO"(VARCHAR), "TIPO INCENTIVO"(VARCHAR), "DATA DO PAGAMENTO"(DATE), "VALOR PARCELA"(VARCHAR)
-
-_peti (803K):
-  "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO SIAFI MUNICÍPIO"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "SITUAÇÃO BENEFÍCIO"(VARCHAR), "VALOR PARCELA"(VARCHAR)
-
-_auxilioreconstrucao (425K):
-  "MÊS REFERÊNCIA"(BIGINT), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(BIGINT), "NOME MUNICÍPIO"(VARCHAR), "CPF FAVORECIDO"(VARCHAR), "NIS FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "QUANTIDADE DE PESSOAS NA FAMÍLIA"(BIGINT), "DATA EFETIVAÇÃO PARCELA"(DATE), "VALOR PARCELA"(VARCHAR)
-
--- EMPRESAS RECEITA FEDERAL (28 tabelas) --
-_empresas_sp(20M), _empresas_mg(7M), _empresas_rj(6M), _empresas_rs(5M), _empresas_pr(5M),
-_empresas_ba(3M), _empresas_sc(3M), _empresas_go(2M), _empresas_pe(2M), _empresas_ce(2M),
-_empresas_df(1M), _empresas_es(1M), _empresas_mt(1M), _empresas_ma(1M), _empresas_pa(1M),
-_empresas_ms(914K), _empresas_pb(881K), _empresas_rn(787K), _empresas_am(740K), _empresas_al(653K),
-_empresas_pi(593K), _empresas_ro(476K), _empresas_to(460K), _empresas_se(457K), _empresas_ex(169K),
-_empresas_ap(151K), _empresas_ac(158K), _empresas_rr(134K)
-Todas com: cnpj_basico(VARCHAR 8 dígitos), razao_social(VARCHAR), porte(VARCHAR), capital_social(DOUBLE), est(STRUCT)
-porte valores: 'MICRO EMPRESA', 'EMPRESA DE PEQUENO PORTE', 'DEMAIS' — NÃO existe 'MEI' como porte separado. MEI não é identificável diretamente — use porte = 'MICRO EMPRESA' como aproximação
-est campos: est.situacao_cadastral ('ATIVA','BAIXADA','INAPTA','SUSPENSA','NULA'), est.situacao_cadastral_codigo, est.municipio, est.municipio_codigo, est.uf,
-            est.cnpj_completo, est.cnpj_basico, est.cnpj_ordem, est.cnpj_dv,
-            est.cnae_principal, est.cnae_principal_codigo, est.cnaes_secundarios_codigos(VARCHAR[]), est.cnaes_secundarios_descricoes(VARCHAR[]),
-            est.data_inicio_atividade(VARCHAR 'YYYYMMDD' — filtrar por ano: est.data_inicio_atividade LIKE '2024%'),
-            est.data_situacao_cadastral(VARCHAR), est.nome_fantasia, est.matriz_filial, est.matriz_filial_codigo,
-            est.motivo_situacao, est.motivo_situacao_codigo, est.situacao_especial, est.data_situacao_especial,
-            est.cep, est.bairro, est.logradouro, est.tipo_logradouro, est.numero, est.complemento,
-            est.telefone_1, est.telefone_2, est.ddd_1, est.ddd_2, est.fax, est.ddd_fax,
-            est.correio_eletronico, est.pais, est.pais_codigo, est.cidade_exterior
+-- EMPRESAS RFB (28 tabelas por UF) --
+_empresas_sp(20M),_mg(7M),_rj(6M),_rs(5M),_pr(5M),_ba(3M),_sc(3M),_go(2M),_pe(2M),_ce(2M),
+_df(1M),_es(1M),_mt(1M),_ma(1M),_pa(1M),_ms(914K),_pb(881K),_rn(787K),_am(740K),_al(653K),
+_pi(593K),_ro(476K),_to(460K),_se(457K),_ex(169K),_ap(151K),_ac(158K),_rr(134K)
+Colunas: cnpj_basico(VARCHAR), razao_social, porte('MICRO EMPRESA'|'EMPRESA DE PEQUENO PORTE'|'DEMAIS'), capital_social(DOUBLE), est(STRUCT)
+est: situacao_cadastral('ATIVA'|'BAIXADA'|'INAPTA'|'SUSPENSA'|'NULA'), uf, municipio, cnpj_completo, cnae_principal, cnae_principal_codigo, cnaes_secundarios_codigos(VARCHAR[]), cnaes_secundarios_descricoes(VARCHAR[]), data_inicio_atividade(VARCHAR YYYYMMDD→LIKE'2024%'), data_situacao_cadastral, nome_fantasia, matriz_filial, motivo_situacao, cep, logradouro, bairro, telefone_1, correio_eletronico
 
 -- SERVIDORES --
-_servidores_cadastro (19M — civis):
-  Id_SERVIDOR_PORTAL(VARCHAR), NOME(VARCHAR), CPF(VARCHAR), MATRICULA(VARCHAR), DESCRICAO_CARGO(VARCHAR), CLASSE_CARGO(VARCHAR), NIVEL_CARGO(VARCHAR), FUNCAO(VARCHAR), COD_UORG_LOTACAO(VARCHAR), UORG_LOTACAO(VARCHAR), COD_ORG_LOTACAO(VARCHAR), ORG_LOTACAO(VARCHAR), COD_ORGSUP_LOTACAO(VARCHAR), ORGSUP_LOTACAO(VARCHAR), COD_ORG_EXERCICIO(VARCHAR), ORG_EXERCICIO(VARCHAR), COD_ORGSUP_EXERCICIO(VARCHAR), ORGSUP_EXERCICIO(VARCHAR), TIPO_VINCULO(VARCHAR), SITUACAO_VINCULO(VARCHAR), REGIME_JURIDICO(VARCHAR), JORNADA_DE_TRABALHO(VARCHAR), DATA_INGRESSO_ORGAO(VARCHAR), UF_EXERCICIO(VARCHAR)
-  SITUACAO_VINCULO valores: 'ATIVO PERMANENTE', 'SEM VINCULO', 'ATIVO - DEC. JUDIC', 'EM DISPONIBILIDADE', 'EXCEDENTE A LOTACAO', 'CONTRATO TEMPORARIO', 'NOMEADO CARGO COMIS.' — NUNCA use 'ATIVO' simples
-_servidores_cadastro__2 (593K): mesmo schema — SITUACAO_VINCULO: 'ATIVO PERMANENTE', 'ATIVO EM OUTRO ORGAO', 'CELETISTA', 'MILITAR DA ATIVA', 'NATUREZA ESPECIAL'
-_servidores_cadastro__3 (793K): mesmo schema — SITUACAO_VINCULO: 'ATIVO PERMANENTE', 'CONT.PROF.SUBSTITUTO', 'SEM VINCULO', 'NATUREZA ESPECIAL'
-_servidores_cadastro__4 (73K — pensionistas): Id_SERVIDOR_PORTAL, NOME, CPF, CPF_REPRESENTANTE_LEGAL, NOME_REPRESENTANTE_LEGAL, CPF_INSTITUIDOR_PENSAO, NOME_INSTITUIDOR_PENSAO, TIPO_PENSAO, DATA_INICIO_PENSAO, ORG_LOTACAO_INSTITUIDOR_PENSAO — SITUACAO_VINCULO: 'PENSIONISTA'
-_servidores_cadastro__5 (12M — militares reserva/reforma): Id_SERVIDOR_PORTAL, NOME, CPF, MATRICULA, TIPO_APOSENTADORIA valores: 'RESERVA', 'REFORMA', 'REFORMA POR INVALIDEZ', 'REFORMA POR DOENÇA', DATA_APOSENTADORIA, DESCRICAO_CARGO, UORG_LOTACAO, ORG_LOTACAO, ORGSUP_LOTACAO, TIPO_VINCULO, SITUACAO_VINCULO valores: 'MILITAR REFORMADO', 'MILITAR DA RESERVA'
-_servidores_cadastro__6 (1M): mesmo schema que __1 — SITUACAO_VINCULO: 'EXCEDENTE A LOTACAO', 'SEM VINCULO', 'ATIVO - DEC. JUDIC'
-_servidores_cadastro__7 (52M — militares ativos): mesmo schema — SITUACAO_VINCULO: 'CEDIDO SUS/LEI 8270', 'CELETISTA/EMPREGADO', 'EMPREGO PUBLICO', 'APOSENTADO TEMPORARI'
-  Para civis ativos use: SITUACAO_VINCULO = 'ATIVO PERMANENTE' (em __1 ou __2)
-  Para militares ativos use: tabela __7 com SITUACAO_VINCULO IN ('CEDIDO SUS/LEI 8270','CELETISTA/EMPREGADO'...) ou MILITAR DA ATIVA em __2
+Schema cadastro: Id_SERVIDOR_PORTAL,NOME,CPF,MATRICULA,DESCRICAO_CARGO,FUNCAO,UORG_LOTACAO,ORG_LOTACAO,ORGSUP_LOTACAO,ORG_EXERCICIO,ORGSUP_EXERCICIO,TIPO_VINCULO,SITUACAO_VINCULO,REGIME_JURIDICO,JORNADA_DE_TRABALHO,DATA_INGRESSO_ORGAO,UF_EXERCICIO
+_servidores_cadastro(19M): SITUACAO_VINCULO='ATIVO PERMANENTE'|'SEM VINCULO'|'CONTRATO TEMPORARIO'|'NOMEADO CARGO COMIS.'
+_servidores_cadastro__2(593K): SITUACAO_VINCULO='ATIVO PERMANENTE'|'MILITAR DA ATIVA'|'CELETISTA'
+_servidores_cadastro__3(793K): SITUACAO_VINCULO='ATIVO PERMANENTE'|'CONT.PROF.SUBSTITUTO'
+_servidores_cadastro__4(73K—pensionistas): CPF_REPRESENTANTE_LEGAL,CPF_INSTITUIDOR_PENSAO,TIPO_PENSAO,DATA_INICIO_PENSAO — SITUACAO_VINCULO='PENSIONISTA'
+_servidores_cadastro__5(12M—militares reforma): TIPO_APOSENTADORIA('RESERVA'|'REFORMA'|'REFORMA POR INVALIDEZ'),DATA_APOSENTADORIA — SITUACAO_VINCULO='MILITAR REFORMADO'|'MILITAR DA RESERVA'
+_servidores_cadastro__6(1M): SITUACAO_VINCULO='EXCEDENTE A LOTACAO'|'SEM VINCULO'
+_servidores_cadastro__7(52M—militares ativos): SITUACAO_VINCULO='CEDIDO SUS/LEI 8270'|'CELETISTA/EMPREGADO'|'EMPREGO PUBLICO'
+⚠️ NUNCA use SITUACAO_VINCULO='ATIVO'. Civis ativos→__1 ou __2 com 'ATIVO PERMANENTE'. Militares ativos→__7.
 
-_servidores_remuneracao (19M):
-  ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), "REMUNERAÇÃO BÁSICA BRUTA (R$)"(VARCHAR), "REMUNERAÇÃO BÁSICA BRUTA (U$)"(VARCHAR), "ABATE-TETO (R$)"(VARCHAR), "GRATIFICAÇÃO NATALINA (R$)"(VARCHAR), "FÉRIAS (R$)"(VARCHAR), "OUTRAS REMUNERAÇÕES EVENTUAIS (R$)"(VARCHAR), "IRRF (R$)"(VARCHAR), "PSS/RPGS (R$)"(VARCHAR), "DEMAIS DEDUÇÕES (R$)"(VARCHAR), "PENSÃO MILITAR (R$)"(VARCHAR), "FUNDO DE SAÚDE (R$)"(VARCHAR), "REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)"(VARCHAR), "TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"(VARCHAR)
-  ANO e MES são VARCHAR: WHERE ANO = '2024' AND MES = '01'
-  ATENÇÃO: _servidores_remuneracao NÃO tem coluna de órgão. Para média por órgão, faça JOIN com _servidores_cadastro via Id_SERVIDOR_PORTAL e use ORGSUP_EXERCICIO ou ORG_EXERCICIO do cadastro.
-_servidores_remuneracao__2(30M), __3(52M), __4(237K), __5(9M) — mesmo schema
+_servidores_remuneracao(19M)+__2(30M)+__3(52M)+__4(237K)+__5(9M):
+  ANO(VARCHAR),MES(VARCHAR),Id_SERVIDOR_PORTAL,CPF,NOME,"REMUNERAÇÃO BÁSICA BRUTA (R$)","ABATE-TETO (R$)","GRATIFICAÇÃO NATALINA (R$)","FÉRIAS (R$)","IRRF (R$)","PSS/RPGS (R$)","DEMAIS DEDUÇÕES (R$)","REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)","TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"
+  ⚠️ SEM coluna de órgão — JOIN com _servidores_cadastro via Id_SERVIDOR_PORTAL para filtrar por órgão
 
-_servidores_afastamentos (84K): ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), DATA_INICIO_AFASTAMENTO(VARCHAR), DATA_FIM_AFASTAMENTO(VARCHAR)
-_servidores_afastamentos__2 (8M): mesmo schema
-
-_servidores_honorarios_jetons_ (45K): ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), EMPRESA(VARCHAR), VALOR(VARCHAR)
-_servidores_honorariosadvocaticios (1M): ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), CPF(VARCHAR), NOME(VARCHAR), OBSERVACOES(VARCHAR), VALOR(VARCHAR)
-_servidores_observacoes(463K), __2(40K), __3(8M), __4(3K), __5(1M), __6(17K), __7(918K):
-  ANO(VARCHAR), MES(VARCHAR), Id_SERVIDOR_PORTAL(VARCHAR), NOME(VARCHAR), CPF(VARCHAR), OBSERVACAO(VARCHAR)
+_servidores_afastamentos(84K)+__2(8M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO,DATA_FIM_AFASTAMENTO
+_servidores_honorarios_jetons_(45K): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,EMPRESA,VALOR
+_servidores_honorariosadvocaticios(1M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,OBSERVACOES,VALOR
+_servidores_observacoes(463K+__2..7): ANO,MES,Id_SERVIDOR_PORTAL,NOME,CPF,OBSERVACAO
 
 -- DESPESAS --
-_despesasdiarias_despesas_empenho (31M):
-  "Id Empenho"(BIGINT), "Código Empenho"(VARCHAR), "Data Emissão"(DATE), "Tipo Empenho"(VARCHAR), "Código Órgão Superior"(BIGINT), "Órgão Superior"(VARCHAR), "Código Órgão"(BIGINT), "Órgão"(VARCHAR), "Código Unidade Gestora"(BIGINT), "Unidade Gestora"(VARCHAR), "Código Função"(VARCHAR), "Função"(VARCHAR), "Código Favorecido"(VARCHAR), "Favorecido"(VARCHAR), "Código Programa"(VARCHAR), "Programa"(VARCHAR), "Código Ação"(VARCHAR), "Ação"(VARCHAR), "Código Categoria de Despesa"(BIGINT), "Categoria de Despesa"(VARCHAR), "Código Grupo de Despesa"(BIGINT), "Grupo de Despesa"(VARCHAR), "Valor Original do Empenho"(VARCHAR), "Valor do Empenho Convertido pra R$"(VARCHAR)
+_despesas_favorecidos(114M): "Código Favorecido","Nome Favorecido","Sigla UF","Nome Município","Código Órgão Superior","Nome Órgão Superior","Código Órgão","Nome Órgão","Ano e mês do lançamento"(VARCHAR'MM/YYYY'→LIKE'%/2024'),"Valor Recebido"(VARCHAR)
+  ⚠️ Campo chama "Nome Favorecido" aqui (outras despesas usam "Favorecido")
 
-_despesasdiarias_despesas_pagamento (103M):
-  "Código Pagamento"(VARCHAR), "Data Emissão"(VARCHAR), "Tipo OB"(VARCHAR), "Código Órgão Superior"(VARCHAR), "Órgão Superior"(VARCHAR), "Código Órgão"(VARCHAR), "Órgão"(VARCHAR), "Código Unidade Gestora"(VARCHAR), "Código Favorecido"(VARCHAR), "Favorecido"(VARCHAR), "Valor Original do Pagamento"(VARCHAR), "Valor do Pagamento Convertido pra R$"(VARCHAR)
-
-_despesasdiarias_despesas_pagamento_favorecidosfinais (131M):
-  "Código Pagamento"(VARCHAR), "Código Lista"(VARCHAR), "Data Emissão"(VARCHAR), "Código Favorecido"(VARCHAR), "Favorecido"(VARCHAR), "Valor do Pagamento em R$"(VARCHAR)
-
-_despesasdiarias_despesas_liquidacao_empenhosimpactados (77M):
-  "Código Liquidação"(VARCHAR), "Código Empenho"(VARCHAR), "Código Natureza Despesa Completa"(VARCHAR), "Valor Liquidado (R$)"(VARCHAR), "Valor Restos a Pagar Pagos (R$)"(VARCHAR)
-
-_despesasdiarias_despesas_pagamento_empenhosimpactados (103M):
-  "Código Pagamento"(VARCHAR), "Código Empenho"(VARCHAR), "Valor Pago (R$)"(VARCHAR)
-
-_despesasdiarias_despesas_itemempenho (33M):
-  "Id Empenho"(BIGINT), "Código Empenho"(VARCHAR), "Descrição"(VARCHAR), "Quantidade"(VARCHAR), "Valor Unitário"(VARCHAR), "Valor Total"(VARCHAR)
-
-_despesas_favorecidos (114M):
-  "Código Favorecido"(VARCHAR), "Nome Favorecido"(VARCHAR), "Sigla UF"(VARCHAR), "Nome Município"(VARCHAR), "Código Órgão Superior"(BIGINT), "Nome Órgão Superior"(VARCHAR), "Código Órgão"(BIGINT), "Nome Órgão"(VARCHAR), "Código Unidade Gestora"(BIGINT), "Nome Unidade Gestora"(VARCHAR), "Ano e mês do lançamento"(VARCHAR formato 'MM/YYYY' ex: '01/2024'), "Valor Recebido"(VARCHAR)
-  ATENÇÃO: nesta tabela o campo chama "Nome Favorecido" — nas outras tabelas de despesas chama "Favorecido"
-  Para filtrar por ano 2024: WHERE "Ano e mês do lançamento" LIKE '%/2024'
-  Para filtrar valor: SUM(CAST(REPLACE("Valor Recebido", ',', '.') AS DECIMAL))
+_despesasdiarias_despesas_empenho(31M): "Id Empenho"(BIGINT),"Código Empenho","Data Emissão"(DATE),"Tipo Empenho","Código Órgão Superior"(BIGINT),"Órgão Superior","Favorecido","Código Favorecido","Função","Programa","Ação","Categoria de Despesa","Grupo de Despesa","Valor Original do Empenho","Valor do Empenho Convertido pra R$"
+_despesasdiarias_despesas_pagamento(103M): "Código Pagamento","Data Emissão","Código Órgão Superior","Órgão Superior","Órgão","Código Favorecido","Favorecido","Valor Original do Pagamento","Valor do Pagamento Convertido pra R$"
+_despesasdiarias_despesas_pagamento_favorecidosfinais(131M): "Código Pagamento","Data Emissão","Código Favorecido","Favorecido","Valor do Pagamento em R$"
+_despesasdiarias_despesas_liquidacao_empenhosimpactados(77M): "Código Liquidação","Código Empenho","Valor Liquidado (R$)","Valor Restos a Pagar Pagos (R$)"
+_despesasdiarias_despesas_pagamento_empenhosimpactados(103M): "Código Pagamento","Código Empenho","Valor Pago (R$)"
+_despesasdiarias_despesas_itemempenho(33M): "Id Empenho"(BIGINT),"Código Empenho","Descrição","Quantidade","Valor Unitário","Valor Total"
 
 -- VIAGENS --
-_viagens_viagem (9M):
-  "Identificador do processo de viagem"(VARCHAR), "Número da Proposta (PCDP)"(VARCHAR), "Situação"(VARCHAR), "Viagem Urgente"(VARCHAR), "Código do órgão superior"(VARCHAR), "Nome do órgão superior"(VARCHAR), "Código órgão solicitante"(VARCHAR), "Nome órgão solicitante"(VARCHAR), "CPF viajante"(VARCHAR), "Nome"(VARCHAR), "Cargo"(VARCHAR), "Função"(VARCHAR), "Período - Data de início"(VARCHAR), "Período - Data de fim"(VARCHAR), "Destinos"(VARCHAR), "Motivo"(VARCHAR), "Valor diárias"(VARCHAR), "Valor passagens"(VARCHAR), "Valor devolução"(VARCHAR), "Valor outros gastos"(VARCHAR)
-
-_viagens_pagamento (16M):
-  "Identificador do processo de viagem"(VARCHAR), "Código do órgão superior"(VARCHAR), "Nome do órgão superior"(VARCHAR), "Codigo do órgão pagador"(VARCHAR), "Nome do órgao pagador"(VARCHAR), "Tipo de pagamento"(VARCHAR), "Valor"(VARCHAR)
-
-_viagens_passagem (5M):
-  "Identificador do processo de viagem"(VARCHAR), "Número da Proposta (PCDP)"(VARCHAR), "Meio de transporte"(VARCHAR), "País - Origem ida"(VARCHAR), "UF - Origem ida"(VARCHAR), "Cidade - Origem ida"(VARCHAR), "País - Destino ida"(VARCHAR), "UF - Destino ida"(VARCHAR), "Cidade - Destino ida"(VARCHAR), "País - Origem volta"(VARCHAR), "UF - Origem volta"(VARCHAR), "Cidade - Origem volta"(VARCHAR), "Pais - Destino volta"(VARCHAR), "UF - Destino volta"(VARCHAR), "Cidade - Destino volta"(VARCHAR), "Valor da passagem"(VARCHAR), "Taxa de serviço"(VARCHAR), "Data da emissão/compra"(VARCHAR), "Hora da emissão/compra"(VARCHAR)
-
-_viagens_trecho (20M):
-  "Identificador do processo de viagem"(VARCHAR), "Número da Proposta (PCDP)"(VARCHAR), "Sequência Trecho"(VARCHAR), "Origem - Data"(VARCHAR), "Origem - País"(VARCHAR), "Origem - UF"(VARCHAR), "Origem - Cidade"(VARCHAR), "Destino - Data"(VARCHAR), "Destino - País"(VARCHAR), "Destino - UF"(VARCHAR), "Destino - Cidade"(VARCHAR), "Meio de transporte"(VARCHAR) valores: 'Aéreo', 'Rodoviário', 'Ferroviário', 'Fluvial', 'Marítimo', 'Veículo Próprio', 'Veículo Oficial', "Número Diárias"(VARCHAR), "Missao?"(VARCHAR) valores: 'Sim', 'Não'
-  ⚠️ NÃO TEM COLUNAS DE ÓRGÃO NEM CPF — SEMPRE faça JOIN obrigatório com _viagens_viagem via "Identificador do processo de viagem" para obter órgão, CPF e nome do servidor. NUNCA use _viagens_trecho sozinha para filtrar por órgão.
-  PADRÃO OBRIGATÓRIO para viagens por órgão:
-    SELECT v."Nome do órgão superior", COUNT(*) FROM _viagens_trecho t
-    JOIN _viagens_viagem v ON t."Identificador do processo de viagem" = v."Identificador do processo de viagem"
-    WHERE t."Destino - País" != 'Brasil' GROUP BY 1 ORDER BY 2 DESC
+_viagens_viagem(9M): "Identificador do processo de viagem","Código do órgão superior","Nome do órgão superior","Nome órgão solicitante","CPF viajante","Nome","Cargo","Período - Data de início","Período - Data de fim","Destinos","Motivo","Valor diárias","Valor passagens"
+_viagens_trecho(20M): "Identificador do processo de viagem","Origem - País","Origem - UF","Origem - Cidade","Destino - País","Destino - UF","Destino - Cidade","Meio de transporte"('Aéreo'|'Rodoviário'|'Fluvial'|'Ferroviário'|'Marítimo'|'Veículo Próprio'|'Veículo Oficial'),"Número Diárias","Missao?"('Sim'|'Não')
+  ⚠️ SEM colunas de órgão/CPF — SEMPRE JOIN com _viagens_viagem via "Identificador do processo de viagem"
+_viagens_passagem(5M): "Identificador do processo de viagem","Meio de transporte","País - Destino ida","UF - Destino ida","Cidade - Destino ida","Valor da passagem","Data da emissão/compra"
+_viagens_pagamento(16M): "Identificador do processo de viagem","Nome do órgão superior","Tipo de pagamento","Valor"
 
 -- SANÇÕES --
-_ceis (22K): "TIPO DE PESSOA"(VARCHAR) 'F'=física 'J'=jurídica, "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL - CADASTRO RECEITA"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR) valores: 'Declaração de Inidoneidade sem prazo determinado', 'Impedimento/proibição de contratar sem prazo determinado', 'Demissão', 'Multa', 'Impedimento/proibição de contratar com prazo determinado', 'Suspensão', "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR)
-_cnep (2K): mesmo schema + "VALOR DA MULTA"(VARCHAR), CATEGORIA DA SANÇÃO valores: 'Perdimento de bens', 'Multa', 'Dissolução compulsória da PJ', 'Proibição de receber incentivos', 'Suspensão/Interdição das atividades com prazo determinado'
-_cepim (4K): "CNPJ ENTIDADE"(VARCHAR), "NOME ENTIDADE"(VARCHAR), "NÚMERO CONVÊNIO"(VARCHAR), "ÓRGÃO CONCEDENTE"(VARCHAR), "MOTIVO DO IMPEDIMENTO"(VARCHAR)
-_ceaf (4K): "TIPO DE PESSOA"(BOOLEAN), "CPF OU CNPJ DO SANCIONADO"(VARCHAR), "NOME DO SANCIONADO"(VARCHAR), "CATEGORIA DA SANÇÃO"(VARCHAR) valores: 'Perda de Emprego/Cargo/Função Pública', 'Cassação de aposentadoria', 'Destituição', 'Destituição de Cargo em Comissão', 'Demissão', "DATA INÍCIO SANÇÃO"(DATE), "DATA FINAL SANÇÃO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "UF ÓRGÃO SANCIONADOR"(VARCHAR)
-_acordos (143): "ID DO ACORDO"(BIGINT), "CNPJ DO SANCIONADO"(VARCHAR), "RAZÃO SOCIAL – CADASTRO RECEITA"(VARCHAR), "SITUAÇÃO DO ACORDO DE LENIÊNICA"(VARCHAR) valores: 'Cumprido', 'Em Execução', "DATA DE INÍCIO DO ACORDO"(DATE), "DATA DE FIM DO ACORDO"(DATE), "ÓRGÃO SANCIONADOR"(VARCHAR), "NÚMERO DO PROCESSO"(VARCHAR), "TERMOS DO ACORDO"(VARCHAR)
+_ceis(22K): "TIPO DE PESSOA"(VARCHAR'F'/'J'),"CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO"('Declaração de Inidoneidade'|'Impedimento/proibição de contratar'|'Suspensão'|'Multa'|'Demissão'),"DATA INÍCIO SANÇÃO"(DATE),"DATA FINAL SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR","UF ÓRGÃO SANCIONADOR"
+_cnep(2K): mesmo schema + "VALOR DA MULTA", CATEGORIA: 'Perdimento de bens'|'Multa'|'Dissolução compulsória da PJ'
+_ceaf(4K): "TIPO DE PESSOA"(BOOLEAN),"CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO"('Perda de Emprego'|'Cassação de aposentadoria'|'Destituição'|'Demissão'),"DATA INÍCIO SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR"
+_cepim(4K): "CNPJ ENTIDADE","NOME ENTIDADE","NÚMERO CONVÊNIO","ÓRGÃO CONCEDENTE","MOTIVO DO IMPEDIMENTO"
+_acordos(143): "CNPJ DO SANCIONADO","RAZÃO SOCIAL","SITUAÇÃO DO ACORDO DE LENIÊNICA"('Cumprido'|'Em Execução'),"DATA DE INÍCIO DO ACORDO"(DATE),"DATA DE FIM DO ACORDO"(DATE),"ÓRGÃO SANCIONADOR"
 
 -- LICITAÇÕES E COMPRAS --
-_licitacoes (2M): "Número Licitação"(VARCHAR), "Código UG"(VARCHAR), "Nome UG"(VARCHAR), "Código Modalidade Compra"(BIGINT), "Modalidade Compra"(VARCHAR), "Número Processo"(VARCHAR), "Objeto"(VARCHAR), "Situação Licitação"(VARCHAR), "Nome Órgão Superior"(VARCHAR), "Nome Órgão"(VARCHAR), "UF"(VARCHAR), "Município"(VARCHAR), "Data Resultado Compra"(DATE), "Data Abertura"(DATE), "Valor Licitação"(VARCHAR)
-_compras (4M): "Código Órgão"(BIGINT), "Nome Órgão"(VARCHAR), "Código UG"(VARCHAR), "Nome UG"(VARCHAR), "Número Contrato"(VARCHAR), "Descrição Item Compra"(VARCHAR), "Quantidade Item"(BIGINT), "Valor Item"(VARCHAR)
-  ⚠️ _compras NÃO tem "Número Licitação" — tem "Número Contrato". Para cruzar _compras com _licitacoes use "Código UG" como chave aproximada, ou apenas use cada tabela separadamente. NUNCA tente JOIN por "Número Licitação" em _compras.
-_convenios (612K): "NÚMERO CONVÊNIO"(VARCHAR), "UF"(VARCHAR), "CÓDIGO SIAFI MUNICÍPIO"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "SITUAÇÃO CONVÊNIO"(VARCHAR) valores: 'EM EXECUÇÃO', 'EXCLUÍDO', 'PRESTAÇÃO DE CONTAS ENVIADA PARA ANÁLISE', 'PRESTAÇÃO DE CONTAS EM COMPLEMENTAÇÃO', 'RESCINDIDO', 'BAIXADO', 'CANCELADO', 'PRESTAÇÃO DE CONTAS REJEITADA', "NÚMERO ORIGINAL"(VARCHAR), "NÚMERO PROCESSO DO CONVÊNIO"(VARCHAR), "OBJETO DO CONVÊNIO"(VARCHAR), "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO CONCEDENTE"(BIGINT), "NOME ÓRGÃO CONCEDENTE"(VARCHAR), "CÓDIGO UG CONCEDENTE"(BIGINT), "NOME UG CONCEDENTE"(VARCHAR), "CÓDIGO CONVENENTE"(VARCHAR), "TIPO CONVENENTE"(VARCHAR) valores: 'Administração Pública', 'Organizações Internacionais', 'Entidades Empresariais Privadas', 'Entidades Sem Fins Lucrativos', 'Administração Pública Estadual ou do Distrito Federal', 'Administração Pública Municipal', 'Pessoa Física', "NOME CONVENENTE"(VARCHAR), "TIPO INSTRUMENTO"(VARCHAR), "VALOR CONVÊNIO"(VARCHAR), "VALOR LIBERADO"(VARCHAR), "DATA PUBLICAÇÃO"(DATE), "DATA INÍCIO VIGÊNCIA"(DATE), "DATA FINAL VIGÊNCIA"(DATE), "VALOR CONTRAPARTIDA"(VARCHAR), "DATA ÚLTIMA LIBERAÇÃO"(DATE), "VALOR ÚLTIMA LIBERAÇÃO"(VARCHAR)
-
-_notasfiscais (274K): "CHAVE DE ACESSO"(DOUBLE), "MODELO"(VARCHAR), "SÉRIE"(BIGINT), "NÚMERO"(BIGINT), "NATUREZA DA OPERAÇÃO"(VARCHAR), "DATA EMISSÃO"(TIMESTAMP), "EVENTO"(VARCHAR), "DATA/HORA EVENTO"(TIMESTAMP), "DESCRIÇÃO EVENTO"(VARCHAR), "MOTIVO EVENTO"(VARCHAR)
-_favorecidospj (81): "COD_NATJURIDICA"(BIGINT), "DESC_NATJURIDICA"(VARCHAR), "COD_TIPO_NATJURIDICA"(BIGINT), "DESC_TIPO_NATJURIDICA"(VARCHAR)
+_licitacoes(2M): "Número Licitação","Nome UG","Modalidade Compra","Objeto","Situação Licitação","Nome Órgão Superior","Nome Órgão","UF","Data Resultado Compra"(DATE),"Data Abertura"(DATE),"Valor Licitação"
+_compras(4M): "Código Órgão"(BIGINT),"Nome Órgão","Código UG","Número Contrato","Descrição Item Compra","Quantidade Item"(BIGINT),"Valor Item"
+  ⚠️ _compras NÃO tem "Número Licitação" — tem "Número Contrato". Não faça JOIN por licitação.
+_convenios(612K): "NÚMERO CONVÊNIO","UF","NOME MUNICÍPIO","SITUAÇÃO CONVÊNIO"('EM EXECUÇÃO'|'RESCINDIDO'|'BAIXADO'|'CANCELADO'|'EXCLUÍDO'|'PRESTAÇÃO DE CONTAS ENVIADA PARA ANÁLISE'|'PRESTAÇÃO DE CONTAS EM COMPLEMENTAÇÃO'|'PRESTAÇÃO DE CONTAS REJEITADA'),"OBJETO DO CONVÊNIO","NOME ÓRGÃO SUPERIOR","NOME ÓRGÃO CONCEDENTE","CÓDIGO CONVENENTE","TIPO CONVENENTE"('Administração Pública'|'Administração Pública Estadual ou do Distrito Federal'|'Administração Pública Municipal'|'Entidades Sem Fins Lucrativos'|'Entidades Empresariais Privadas'|'Pessoa Física'|'Organizações Internacionais'),"NOME CONVENENTE","VALOR CONVÊNIO","VALOR LIBERADO","DATA INÍCIO VIGÊNCIA"(DATE),"DATA FINAL VIGÊNCIA"(DATE)
 
 -- CARTÃO CORPORATIVO --
-_cpgf (2M): "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO"(BIGINT), "NOME ÓRGÃO"(VARCHAR), "ANO EXTRATO"(BIGINT), "MÊS EXTRATO"(VARCHAR), "CPF PORTADOR"(VARCHAR), "NOME PORTADOR"(VARCHAR), "CNPJ OU CPF FAVORECIDO"(VARCHAR), "NOME FAVORECIDO"(VARCHAR), "TRANSAÇÃO"(VARCHAR), "DATA TRANSAÇÃO"(DATE), "VALOR TRANSAÇÃO"(VARCHAR)
-_cpcc (1M): "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO"(BIGINT), "NOME ÓRGÃO"(VARCHAR), "CÓDIGO UNIDADE GESTORA"(BIGINT), "ANO EXTRATO"(BIGINT), "MÊS EXTRATO"(VARCHAR), "TIPO AQUISIÇÃO"(VARCHAR), "CNPJ OU CPF FAVORECIDO"(BIGINT), "NOME FAVORECIDO"(VARCHAR), "TRANSAÇÃO"(VARCHAR), "DATA TRANSAÇÃO"(DATE), "VALOR TRANSAÇÃO"(VARCHAR)
-_cpdc (129K): "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO"(BIGINT), "NOME ÓRGÃO"(VARCHAR), "CÓDIGO UNIDADE GESTORA"(BIGINT), "ANO EXTRATO"(BIGINT), "MÊS EXTRATO"(VARCHAR), "CPF PORTADOR"(VARCHAR), "NOME PORTADOR"(VARCHAR), "CNPJ OU CPF FAVORECIDO"(VARCHAR), "NOME FAVORECIDO"(VARCHAR), "EXECUTOR DESPESA"(VARCHAR), "NÚMERO CONVÊNIO"(BIGINT), "CÓDIGO CONVENENTE"(VARCHAR), "NOME CONVENENTE"(VARCHAR), "REPASSE"(VARCHAR), "TRANSAÇÃO"(VARCHAR), "DATA TRANSAÇÃO"(DATE), "VALOR TRANSAÇÃO"(VARCHAR)
+Schema base cartão: "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT),"NOME ÓRGÃO SUPERIOR","CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","ANO EXTRATO"(BIGINT),"MÊS EXTRATO"(VARCHAR),"NOME FAVORECIDO","TRANSAÇÃO","DATA TRANSAÇÃO"(DATE),"VALOR TRANSAÇÃO"
+_cpgf(2M): +CPF PORTADOR,NOME PORTADOR,"CNPJ OU CPF FAVORECIDO"
+_cpcc(1M): +"TIPO AQUISIÇÃO","CNPJ OU CPF FAVORECIDO"(BIGINT)
+_cpdc(129K): +CPF PORTADOR,NOME PORTADOR,"CNPJ OU CPF FAVORECIDO","NÚMERO CONVÊNIO"(BIGINT),"NOME CONVENENTE"
 
 -- OUTROS --
-_pep (71K): "CPF"(VARCHAR), "Nome_PEP"(VARCHAR), "Sigla_Função"(VARCHAR), "Descrição_Função"(VARCHAR), "Nível_Função"(VARCHAR), "Nome_Órgão"(VARCHAR), "Data_Início_Exercício"(DATE), "Data_Fim_Exercício"(VARCHAR), "Data_Fim_Carência"(VARCHAR)
-_renúnciasfiscais (752K): "Ano-calendário"(BIGINT), "CNPJ"(VARCHAR), "Razão Social"(VARCHAR), "Nome Fantasia"(VARCHAR), "Código CNAE"(VARCHAR), "CNAE"(VARCHAR), "Município"(VARCHAR), "UF"(VARCHAR), "Tipo Renúncia"(VARCHAR), "Benefício Fiscal"(VARCHAR), "Fundamento Legal"(VARCHAR), "Descrição"(VARCHAR), "Tributo"(VARCHAR), "Forma Tributação"(VARCHAR), "Valor Renúncia Fiscal (R$)"(VARCHAR)
-_emendas (70K): "Código da Emenda"(BIGINT), "Nome Função"(VARCHAR), "Localidade do gasto"(VARCHAR), "Tipo de Emenda"(VARCHAR), "Convenente"(VARCHAR), "Valor Convênio"(VARCHAR)
-_emendasparlamentarespordocumento (4M): "Código da Emenda"(VARCHAR), "Ano da Emenda"(BIGINT), "Nome do Autor da Emenda"(VARCHAR), "Número da emenda"(VARCHAR), "Valor Empenhado"(VARCHAR), "Valor Pago"(VARCHAR), "Tipo de Emenda"(VARCHAR), "UF de aplicação do recurso"(VARCHAR), "Favorecido"(VARCHAR), "Fase da despesa"(VARCHAR)
-_transferencias (9M): "ANO / MÊS"(BIGINT YYYYMM), "TIPO TRANSFERÊNCIA"(VARCHAR), "TIPO FAVORECIDO"(VARCHAR), "UF"(VARCHAR), "CÓDIGO MUNICÍPIO SIAFI"(VARCHAR), "NOME MUNICÍPIO"(VARCHAR), "NOME ÓRGÃO"(VARCHAR), "CÓDIGO FAVORECIDO"(VARCHAR), "NOME FAVORECIDO"(VARCHAR), "VALOR TRANSFERIDO"(VARCHAR)
-_imoveisfuncionais (23K): "NOME PERMISSIONÁRIO"(VARCHAR), "CPF"(VARCHAR), "CARGO OU FUNÇÃO DE CONFIANÇA"(VARCHAR), "ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO"(VARCHAR), "DATA INÍCIO OCUPAÇÃO"(DATE)
-  ATENÇÃO: NÃO tem coluna UF — para agrupar por estado use "ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO"
-_execuçãodareceita (2M): "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "CÓDIGO ÓRGÃO"(BIGINT), "NOME ÓRGÃO"(VARCHAR), "CÓDIGO UNIDADE GESTORA"(BIGINT), "NOME UNIDADE GESTORA"(VARCHAR), "CATEGORIA ECONÔMICA"(VARCHAR), "ORIGEM RECEITA"(VARCHAR), "ESPÉCIE RECEITA"(VARCHAR), "DETALHAMENTO"(VARCHAR), "VALOR PREVISTO ATUALIZADO"(VARCHAR), "VALOR LANÇADO"(VARCHAR), "VALOR REALIZADO"(VARCHAR), "PERCENTUAL REALIZADO"(VARCHAR), "DATA LANÇAMENTO"(DATE), "ANO EXERCÍCIO"(BIGINT)
-_orçamentodadespesa (305K): "EXERCÍCIO"(BIGINT), "NOME ÓRGÃO SUPERIOR"(VARCHAR), "NOME ÓRGÃO SUBORDINADO"(VARCHAR), "NOME FUNÇÃO"(VARCHAR), "NOME PROGRAMA ORÇAMENTÁRIO"(VARCHAR), "NOME AÇÃO"(VARCHAR), "ORÇAMENTO INICIAL (R$)"(VARCHAR), "ORÇAMENTO ATUALIZADO (R$)"(VARCHAR), "ORÇAMENTO EMPENHADO (R$)"(VARCHAR), "ORÇAMENTO REALIZADO (R$)"(VARCHAR)
-_apoiamentoemendasparlamentares (34K): "Código Apoiador"(BIGINT), "Apoiador"(VARCHAR), "Data do Apoio"(TIMESTAMP), "Empenho"(VARCHAR), "Código da Emenda"(BIGINT), "Nome do Autor da Emenda"(VARCHAR), "Valor Empenhado"(VARCHAR), "Valor Pago"(VARCHAR), "Órgão Superior"(VARCHAR)
+_pep(71K): CPF,"Nome_PEP","Descrição_Função","Nome_Órgão","Data_Início_Exercício"(DATE),"Data_Fim_Exercício","Data_Fim_Carência"
+_imoveisfuncionais(23K): "NOME PERMISSIONÁRIO",CPF,"ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO","DATA INÍCIO OCUPAÇÃO"(DATE) — SEM coluna UF
+_orçamentodadespesa(305K): "EXERCÍCIO"(BIGINT),"NOME ÓRGÃO SUPERIOR","NOME FUNÇÃO","NOME PROGRAMA ORÇAMENTÁRIO","NOME AÇÃO","ORÇAMENTO INICIAL (R$)","ORÇAMENTO EMPENHADO (R$)","ORÇAMENTO REALIZADO (R$)"
+_execuçãodareceita(2M): "CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","CATEGORIA ECONÔMICA","ORIGEM RECEITA","VALOR PREVISTO ATUALIZADO","VALOR REALIZADO","DATA LANÇAMENTO"(DATE),"ANO EXERCÍCIO"(BIGINT)
+_transferencias(9M): "ANO / MÊS"(BIGINT YYYYMM),"TIPO TRANSFERÊNCIA","UF","NOME MUNICÍPIO","NOME ÓRGÃO","CÓDIGO FAVORECIDO","NOME FAVORECIDO","VALOR TRANSFERIDO"
+_emendasparlamentarespordocumento(4M): "Código da Emenda","Ano da Emenda"(BIGINT),"Nome do Autor da Emenda","Valor Empenhado","Valor Pago","Tipo de Emenda","UF de aplicação do recurso","Favorecido"
+_renúnciasfiscais(752K): "Ano-calendário"(BIGINT),CNPJ,"Razão Social","Código CNAE",UF,"Tipo Renúncia","Benefício Fiscal","Tributo","Valor Renúncia Fiscal (R$)"
+_apoiamentoemendasparlamentares(34K): "Código Apoiador"(BIGINT),"Apoiador","Nome do Autor da Emenda","Valor Empenhado","Valor Pago","Órgão Superior"
+_notasfiscais(274K): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENTO","DESCRIÇÃO EVENTO"
 `;
 
 /* ========================= MAIN HANDLER ========================= */
