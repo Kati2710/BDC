@@ -29,7 +29,10 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
 - CEIS/CNEP/CEAF: coluna de nome é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
 - ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" — NÃO existe "SITUAÇÃO DO ACORDO". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
-- strftime: NÃO use strftime() — use SUBSTRING(col,1,4) para ano, SUBSTRING(col,6,2) para mês em colunas DATE/VARCHAR. Para DATE→string use CAST(EXTRACT(YEAR FROM col) AS VARCHAR)
+- VALORES monetários com ponto de milhar + vírgula decimal (ex: "10.313.296,80"): use CAST(REPLACE(REPLACE(col, '.', ''), ',', '.') AS DECIMAL) — padrão EXATO, dois REPLACE aninhados. Isso vale para "Valor diárias","Valor passagens","Valor Licitação","VALOR TRANSFERIDO","VALOR LIBERADO","VALOR CONVÊNIO","Valor Renúncia Fiscal (R$)" e qualquer coluna monetária que não seja da folha de servidores
+- DATAS VARCHAR em viagens: "Período - Data de início" e "Período - Data de fim" são VARCHAR no formato 'YYYY-MM-DD'. Para extrair ano use SUBSTRING("Período - Data de início",1,4). NUNCA use EXTRACT(YEAR FROM ...) ou date_part() em colunas VARCHAR
+- WINDOW FUNCTIONS: NUNCA use funções de janela (OVER()) em cláusula WHERE. Use QUALIFY para filtrar por window function, ou envolva em subconsulta
+- SERVIDORES pensionistas (_cadastro__4): coluna de órgão chama ORGSUP_LOTACAO_INSTITUIDOR_PENSAO — NÃO existe ORGSUP_LOTACAO nessa tabela
 - CEPIM: coluna é "CNPJ ENTIDADE" (VARCHAR) — JOIN com convenios via "CÓDIGO CONVENENTE" ou razao_social aproximado, NÃO por CNPJ direto pois formatos diferem
 - CNAES em array: cnaes_secundarios_codigos é VARCHAR[] — para filtrar use array_contains(est.cnaes_secundarios_codigos, '6201') NUNCA use LIKE em array
 - NÃO existem tabelas empresas_baixadas, empresas_inaptas, empresas_ativas — use _empresas_UF com filtro em est.situacao_cadastral
@@ -223,15 +226,28 @@ function applySqlAutoFix(sql) {
   // CEIS/CNEP/CEAF: coluna inexistente
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
   // Acordos: razão social sem sufixo
-  s = s.replace(/"RAZÃO SOCIAL"(?! [–-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
+  s = s.replace(/"RAZÃO SOCIAL"(?! [–\-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
   // _pep e _despesas: underscore errado em nomes de colunas
   s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
-  // Valores monetários com ponto de milhar + vírgula decimal
-  s = s.replace(/CAST\(REPLACE\("Valor Licitação",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("Valor Licitação",\'.\',\'\'),\',\',\'.\')');
-  s = s.replace(/CAST\(REPLACE\("VALOR TRANSFERIDO",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("VALOR TRANSFERIDO",\'.\',\'\'),\',\',\'.\')');
-  s = s.replace(/CAST\(REPLACE\("VALOR LIBERADO",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("VALOR LIBERADO",\'.\',\'\'),\',\',\'.\')');
-  s = s.replace(/CAST\(REPLACE\("VALOR CONVÊNIO",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("VALOR CONVÊNIO",\'.\',\'\'),\',\',\'.\')');
+  // Pensionistas: coluna errada
+  s = s.replace(/c\.ORGSUP_LOTACAO(?!_)/g, 'c.ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
+  // REPLACE simples em colunas monetárias com ponto de milhar → REPLACE duplo
+  // Padrão: REPLACE(col, '.', '') sem segundo REPLACE
+  const monetaryCols = [
+    '"Valor diárias"', '"Valor passagens"', '"Valor Licitação"',
+    '"VALOR TRANSFERIDO"', '"VALOR LIBERADO"', '"VALOR CONVÊNIO"',
+    '"Valor Renúncia Fiscal (R$)"', '"VALOR LIBERADO"'
+  ];
+  for (const col of monetaryCols) {
+    const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Fix: REPLACE(col, '.', '') → REPLACE(REPLACE(col, '.', ''), ',', '.')
+    const single = new RegExp(`REPLACE\\(${escaped},\\s*'\\.',\\s*''\\)`, 'g');
+    s = s.replace(single, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
+    // Fix: REPLACE(col,',','.') sem remover ponto antes
+    const comma = new RegExp(`REPLACE\\(${escaped},\\s*',',\\s*'\\.'\\)`, 'g');
+    s = s.replace(comma, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
+  }
   return s;
 }
 
