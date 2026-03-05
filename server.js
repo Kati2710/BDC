@@ -29,10 +29,13 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
 - CEIS/CNEP/CEAF: coluna de nome é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
 - ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" — NÃO existe "SITUAÇÃO DO ACORDO". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
-- VALORES monetários com ponto de milhar + vírgula decimal (ex: "10.313.296,80"): use CAST(REPLACE(REPLACE(col, '.', ''), ',', '.') AS DECIMAL) — padrão EXATO, dois REPLACE aninhados. Isso vale para "Valor diárias","Valor passagens","Valor Licitação","VALOR TRANSFERIDO","VALOR LIBERADO","VALOR CONVÊNIO","Valor Renúncia Fiscal (R$)" e qualquer coluna monetária que não seja da folha de servidores
-- DATAS VARCHAR em viagens: "Período - Data de início" e "Período - Data de fim" são VARCHAR no formato 'YYYY-MM-DD'. Para extrair ano use SUBSTRING("Período - Data de início",1,4). NUNCA use EXTRACT(YEAR FROM ...) ou date_part() em colunas VARCHAR
-- WINDOW FUNCTIONS: NUNCA use funções de janela (OVER()) em cláusula WHERE. Use QUALIFY para filtrar por window function, ou envolva em subconsulta
+- VALORES monetários com ponto de milhar + vírgula decimal (ex: "10.313.296,80"): use CAST(REPLACE(REPLACE(col, '.', ''), ',', '.') AS DECIMAL) — padrão EXATO com DOIS REPLACE aninhados. Isso vale para "Valor diárias","Valor passagens","Valor Licitação","VALOR TRANSFERIDO","VALOR LIBERADO","VALOR CONVÊNIO","Valor Renúncia Fiscal (R$)","ORÇAMENTO REALIZADO (R$)","ORÇAMENTO ATUALIZADO (R$)" e qualquer coluna monetária fora da folha de servidores
+- DATAS VARCHAR em viagens: "Período - Data de início" e "Período - Data de fim" são VARCHAR 'YYYY-MM-DD'. Para ano: SUBSTRING("Período - Data de início",1,4). NUNCA use EXTRACT/date_part em VARCHAR
+- DATAS DATE (não VARCHAR): para extrair ano de coluna DATE use CAST(EXTRACT(YEAR FROM col) AS VARCHAR) ou SUBSTRING(CAST(col AS VARCHAR),1,4) — NUNCA SUBSTRING direto em DATE
+- WINDOW FUNCTIONS: NUNCA use funções de janela (OVER()) em WHERE. Use QUALIFY ou subconsulta
 - SERVIDORES pensionistas (_cadastro__4): coluna de órgão chama ORGSUP_LOTACAO_INSTITUIDOR_PENSAO — NÃO existe ORGSUP_LOTACAO nessa tabela
+- DESPESAS empenho (_despesasdiarias_despesas_empenho): coluna órgão é "Órgão Superior" e "NOME ÓRGÃO SUPERIOR" — NÃO é "Nome Órgão Superior"
+- CEPIM: JOIN com outras tabelas via CNPJ é impreciso pois "CNPJ ENTIDADE" no CEPIM é apenas o CNPJ base (8 dígitos) sem filial. Para cruzar com _convenios use "CÓDIGO CONVENENTE" LIKE c."CNPJ ENTIDADE" || '%'
 - CEPIM: coluna é "CNPJ ENTIDADE" (VARCHAR) — JOIN com convenios via "CÓDIGO CONVENENTE" ou razao_social aproximado, NÃO por CNPJ direto pois formatos diferem
 - CNAES em array: cnaes_secundarios_codigos é VARCHAR[] — para filtrar use array_contains(est.cnaes_secundarios_codigos, '6201') NUNCA use LIKE em array
 - NÃO existem tabelas empresas_baixadas, empresas_inaptas, empresas_ativas — use _empresas_UF com filtro em est.situacao_cadastral
@@ -227,24 +230,27 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
   // Acordos: razão social sem sufixo
   s = s.replace(/"RAZÃO SOCIAL"(?! [–\-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
-  // _pep e _despesas: underscore errado em nomes de colunas
+  // _pep: underscore errado
   s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
   // Pensionistas: coluna errada
-  s = s.replace(/c\.ORGSUP_LOTACAO(?!_)/g, 'c.ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
-  // REPLACE simples em colunas monetárias com ponto de milhar → REPLACE duplo
-  // Padrão: REPLACE(col, '.', '') sem segundo REPLACE
+  s = s.replace(/([^_])ORGSUP_LOTACAO(?!_)/g, '$1ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
+  // Despesas empenho: case errado no nome do órgão
+  s = s.replace(/"Nome Órgão Superior"/g, '"NOME ÓRGÃO SUPERIOR"');
+  // DATE com SUBSTRING: precisa cast para VARCHAR
+  s = s.replace(/SUBSTRING\("DATA LANÇAMENTO",\s*1,\s*7\)/g, 'SUBSTRING(CAST("DATA LANÇAMENTO" AS VARCHAR),1,7)');
+  s = s.replace(/SUBSTRING\(("Data Emissão"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
+  // REPLACE simples em colunas monetárias → REPLACE duplo
   const monetaryCols = [
     '"Valor diárias"', '"Valor passagens"', '"Valor Licitação"',
     '"VALOR TRANSFERIDO"', '"VALOR LIBERADO"', '"VALOR CONVÊNIO"',
-    '"Valor Renúncia Fiscal (R$)"', '"VALOR LIBERADO"'
+    '"Valor Renúncia Fiscal (R$)"', '"ORÇAMENTO REALIZADO (R$)"',
+    '"ORÇAMENTO ATUALIZADO (R$)"'
   ];
   for (const col of monetaryCols) {
     const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Fix: REPLACE(col, '.', '') → REPLACE(REPLACE(col, '.', ''), ',', '.')
     const single = new RegExp(`REPLACE\\(${escaped},\\s*'\\.',\\s*''\\)`, 'g');
     s = s.replace(single, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
-    // Fix: REPLACE(col,',','.') sem remover ponto antes
     const comma = new RegExp(`REPLACE\\(${escaped},\\s*',',\\s*'\\.'\\)`, 'g');
     s = s.replace(comma, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
   }
