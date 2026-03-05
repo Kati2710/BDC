@@ -120,6 +120,63 @@ _emendasparlamentarespordocumento(4M): "Código da Emenda","Ano da Emenda"(BIGIN
 _renúnciasfiscais(752K): "Ano-calendário"(BIGINT),CNPJ,"Razão Social","Código CNAE",UF,"Tipo Renúncia","Benefício Fiscal","Tributo","Valor Renúncia Fiscal (R$)"
 _apoiamentoemendasparlamentares(34K): "Código Apoiador"(BIGINT),"Apoiador","Nome do Autor da Emenda","Valor Empenhado","Valor Pago","Órgão Superior"
 _notasfiscais(274K): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENTO","DESCRIÇÃO EVENTO"
+
+== CRUZAMENTOS PRINCIPAIS — USE ESTES PADRÕES EXATOS ==
+
+[CNPJ: sancionado recebendo dinheiro federal]
+WITH sancionados AS (SELECT DISTINCT "CPF OU CNPJ DO SANCIONADO" as cnpj FROM _ceis WHERE "TIPO DE PESSOA"='J')
+SELECT s.cnpj, e.razao_social, SUM(CAST(REPLACE(d."Valor Recebido",',','.') AS DECIMAL)) as total_recebido
+FROM sancionados s
+JOIN _despesas_favorecidos d ON d."Código Favorecido" = s.cnpj
+JOIN _empresas_sp e ON e.est.cnpj_completo = s.cnpj  -- trocar UF conforme necessário
+WHERE d."Ano e mês do lançamento" LIKE '%/2024'
+GROUP BY s.cnpj, e.razao_social ORDER BY total_recebido DESC
+
+[CPF: PEP aparece como favorecido em despesas]
+SELECT p.CPF, p."Nome_PEP", p."Descrição_Função", d."Nome Favorecido", d."Nome Órgão Superior",
+  SUM(CAST(REPLACE(d."Valor Recebido",',','.') AS DECIMAL)) as total_recebido
+FROM _pep p
+JOIN _despesas_favorecidos d ON d."Código Favorecido" = p.CPF
+WHERE d."Ano e mês do lançamento" LIKE '%/2024'
+GROUP BY p.CPF, p."Nome_PEP", p."Descrição_Função", d."Nome Favorecido", d."Nome Órgão Superior"
+
+[CPF: servidor com jetom E viagem internacional]
+SELECT j.CPF, j.NOME, j.EMPRESA, j.VALOR as valor_jetom,
+  v."Destinos", v."Período - Data de início"
+FROM _servidores_honorarios_jetons_ j
+JOIN _viagens_viagem v ON v."CPF viajante" = j.CPF
+WHERE v."Destinos" NOT LIKE '%Brasil%' OR v."Destinos" LIKE '%exterior%'
+ORDER BY CAST(REPLACE(j.VALOR,',','.') AS DECIMAL) DESC LIMIT 100
+
+[CNPJ: empresa baixada/inapta que ganhou licitação]
+-- ⚠️ _licitacoes não tem CNPJ — cruzar por razao_social é impreciso. Melhor via _despesas_favorecidos:
+WITH empresas_irregulares AS (
+  SELECT est.cnpj_completo as cnpj, razao_social, est.situacao_cadastral
+  FROM _empresas_sp WHERE est.situacao_cadastral IN ('BAIXADA','INAPTA','SUSPENSA')
+  UNION ALL SELECT est.cnpj_completo, razao_social, est.situacao_cadastral FROM _empresas_mg WHERE est.situacao_cadastral IN ('BAIXADA','INAPTA','SUSPENSA')
+  -- repetir para outros estados relevantes
+)
+SELECT e.cnpj, e.razao_social, e.situacao_cadastral,
+  SUM(CAST(REPLACE(d."Valor Recebido",',','.') AS DECIMAL)) as total_recebido
+FROM empresas_irregulares e
+JOIN _despesas_favorecidos d ON d."Código Favorecido" = e.cnpj
+WHERE d."Ano e mês do lançamento" LIKE '%/2024'
+GROUP BY e.cnpj, e.razao_social, e.situacao_cadastral ORDER BY total_recebido DESC LIMIT 100
+
+[CNPJ: empresa no CEIS + no CNEP (sanção dupla)]
+SELECT c.\"CPF OU CNPJ DO SANCIONADO\" as cnpj, c.\"NOME DO SANCIONADO\",
+  c.\"CATEGORIA DA SANÇÃO\" as sancao_ceis, n.\"CATEGORIA DA SANÇÃO\" as sancao_cnep,
+  c.\"ÓRGÃO SANCIONADOR\"
+FROM _ceis c JOIN _cnep n ON n.\"CPF OU CNPJ DO SANCIONADO\" = c.\"CPF OU CNPJ DO SANCIONADO\"
+
+[CPF: servidor + remuneração por órgão]
+SELECT c.NOME, c.ORGSUP_EXERCICIO, c.DESCRICAO_CARGO,
+  r."REMUNERAÇÃO BÁSICA BRUTA (R$)", r."REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)"
+FROM _servidores_cadastro c
+JOIN _servidores_remuneracao r ON r.Id_SERVIDOR_PORTAL = c.Id_SERVIDOR_PORTAL
+WHERE r.ANO='2024' AND r.MES='12'
+AND c.ORGSUP_EXERCICIO LIKE '%SAÚDE%'
+ORDER BY CAST(REPLACE(r."REMUNERAÇÃO BÁSICA BRUTA (R$)",',','.') AS DECIMAL) DESC LIMIT 100
 `;
 
 /* ========================= MAIN HANDLER ========================= */
