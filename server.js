@@ -15,6 +15,7 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 
 == REGRAS SQL ==
 - BIGINT: só operadores numéricos. VARCHAR: LIKE/=. STRUCT: ponto (est.uf). Aspas duplas em colunas com espaços/acentos.
+- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao — e agrupe pelo alias (GROUP BY uf). NUNCA use GROUP BY est.uf fora do SELECT original onde o STRUCT foi acessado.
 - DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412. NUNCA divida por 100.
 - VALORES monetários são VARCHAR: SUM(CAST(REPLACE("VALOR PARCELA",',','.') AS DECIMAL))
 - LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
