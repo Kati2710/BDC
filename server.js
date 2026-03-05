@@ -284,7 +284,8 @@ ${DB_CATALOG}
 PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
-REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`
+REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.
+AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _audit_data_publicacao, _audit_arquivo_origem de pelo menos uma das tabelas principais consultadas (apenas 1 linha de auditoria por fonte é suficiente — use MIN() ou LIMIT 1 em subquery). Isso permite rastreabilidade da fonte.`
       }]
     });
 
@@ -318,16 +319,45 @@ REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, 
       max_tokens: 2000,
       messages: [{
         role: "user",
-        content: `Pergunta: "${query}"
+        content: `Você é um analista de dados públicos brasileiros. Responda à pergunta abaixo com base nos resultados da consulta, seguindo OBRIGATORIAMENTE o padrão de citação científica com rastreabilidade completa.
 
-SQL executado:
+PERGUNTA: "${query}"
+
+SQL EXECUTADO:
 ${sql}
 
-Resultados (${data.row_count} linhas):
+RESULTADOS (${data.row_count} linhas):
 ${JSON.stringify(data.rows?.slice(0, 50), null, 2)}
 
-Explique os resultados em português de forma clara e objetiva.
-Formate valores monetários em R$. Cite a fonte dos dados.`
+REGRAS DE FORMATAÇÃO OBRIGATÓRIAS:
+
+1. Cada afirmação factual deve ter uma citação numérica superscrita [1], [2], [3] etc.
+2. Ao final, inclua seção "## Fontes" com cada citação detalhada.
+3. NOS RESULTADOS, procure as colunas de auditoria: _audit_url_origem, _audit_data_publicacao, _audit_arquivo_origem, _audit_data_processamento. Se presentes, USE-AS para construir as citações com a URL exata e data de publicação real do governo.
+4. Se as colunas de auditoria estiverem presentes, a citação deve ter este formato:
+   [N] INSTITUIÇÃO – Nome do conjunto de dados. Publicado em: _audit_data_publicacao. Arquivo: _audit_arquivo_origem. URL: _audit_url_origem
+
+MAPEAMENTO DE TABELAS → INSTITUIÇÕES (use quando colunas de auditoria não estiverem disponíveis):
+- _ceis, _cnep, _ceaf, _cepim, _acordos → CGU – Controladoria-Geral da União (Portal da Transparência)
+- _pep → CGU – Cadastro de Pessoas Expostas Politicamente
+- _bolsafamilia*, _novobolsafamilia, _bpc, _auxilioemergencial, _auxiliobrasil, _pedemeia*, _segurodefeso*, _garantiasafra* → MDS – Ministério do Desenvolvimento Social
+- _servidores_* → SEGES/MGI – Secretaria de Gestão e Inovação
+- _viagens_*, _cpgf* → CGU – Portal da Transparência (Viagens / Cartão Corporativo)
+- _despesas_*, _despesasdiarias_* → SOF/STN – SIAFI / Portal da Transparência
+- _convenios* → CGU – SICONV/Transferegov
+- _licitacoes*, _compras* → SEGES – Portal de Compras do Governo Federal
+- _empresas_* → RFB – Receita Federal do Brasil (CNPJ)
+- _renuncias* → SOF – Secretaria de Orçamento Federal
+
+EXEMPLO COM AUDITORIA REAL:
+"A empresa XYZ (CNPJ 12.345.678/0001-90) está INAPTA na Receita Federal [1] e figura no CEIS com sanção desde 2022 [2], tendo recebido R$ 4,2 milhões em 2024 [3].
+
+## Fontes
+[1] Receita Federal do Brasil – Cadastro Nacional de Pessoas Jurídicas. Publicado em: 2025-03-01. Arquivo: K3241.K03200Y24.D50112.csv. URL: https://dadosabertos.rfb.gov.br/CNPJ/dados_abertos_cnpj/
+[2] CGU – Cadastro de Empresas Inidôneas e Suspensas (CEIS). Publicado em: 2025-02-15. URL: https://portaldatransparencia.gov.br/download-de-dados/ceis
+[3] CGU – Portal da Transparência – Despesas por Favorecido 2024. URL: https://portaldatransparencia.gov.br/download-de-dados/despesas"
+
+Formate valores em R$. Seja preciso e objetivo.`
       }]
     });
 
