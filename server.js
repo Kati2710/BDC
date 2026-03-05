@@ -22,6 +22,8 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - CTEs: não aplique CAST/REPLACE em colunas já computadas como DECIMAL
 - UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Em UNION com ORDER BY, use alias numérico (ORDER BY 1,2) ou nome de coluna simples — NUNCA expressão como CAST(MES AS INTEGER)
 - UNION com múltiplas tabelas (análise completa de CNPJ): todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
+- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio — e agrupe pelo alias (GROUP BY uf). NUNCA use est.* fora do SELECT onde o STRUCT foi acessado — nem em WHERE, nem em GROUP BY, nem em ORDER BY de queries externas
+- DUE DILIGENCE / ANÁLISE DE CNPJ: NUNCA use UNION entre tabelas com colunas diferentes. Use queries SEPARADAS por seção com SELECT 'SEÇÃO' as fonte, coluna1, coluna2 — mantenha EXATAMENTE 3 colunas em cada parte do UNION: fonte, campo, valor
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
 - SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
 - AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR com formato DD/MM/YYYY ou 'Não informada'. Para filtrar por duração use: TRY_STRPTIME(DATA_INICIO_AFASTAMENTO, '%d/%m/%Y') — NUNCA TRY_CAST direto como DATE
@@ -102,6 +104,7 @@ _cnep(2K): mesmo schema + "VALOR DA MULTA", CATEGORIA: 'Perdimento de bens'|'Mul
 _ceaf(4K): "TIPO DE PESSOA"(BOOLEAN),"CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO"('Perda de Emprego'|'Cassação de aposentadoria'|'Destituição'|'Demissão'),"DATA INÍCIO SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR"
 _cepim(4K): "CNPJ ENTIDADE","NOME ENTIDADE","NÚMERO CONVÊNIO","ÓRGÃO CONCEDENTE","MOTIVO DO IMPEDIMENTO"
 _acordos(143): "CNPJ DO SANCIONADO","RAZÃO SOCIAL","SITUAÇÃO DO ACORDO DE LENIÊNICA"('Cumprido'|'Em Execução'),"DATA DE INÍCIO DO ACORDO"(DATE),"DATA DE FIM DO ACORDO"(DATE),"ÓRGÃO SANCIONADOR"
+  ⚠️ "RAZÃO SOCIAL" existe APENAS em _acordos — NÃO existe no _ceis/_cnep/_ceaf (nesses use "NOME DO SANCIONADO")
 
 -- LICITAÇÕES E COMPRAS --
 _licitacoes(2M): "Número Licitação","Nome UG","Modalidade Compra","Objeto","Situação Licitação","Nome Órgão Superior","Nome Órgão","UF","Data Resultado Compra"(DATE),"Data Abertura"(DATE),"Valor Licitação"
@@ -199,7 +202,7 @@ app.post("/chat", async (req, res) => {
 
     const sqlGen = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
-      max_tokens: 2500,
+      max_tokens: 3500,
       messages: [{
         role: "user",
         content: `Você é especialista em DuckDB e dados públicos brasileiros.
@@ -209,7 +212,7 @@ ${DB_CATALOG}
 PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
-Responda APENAS com SQL puro — sem explicações, sem markdown, sem blocos de código.`
+REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`
       }]
     });
 
