@@ -15,21 +15,27 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 
 == REGRAS SQL ==
 - BIGINT: só operadores numéricos. VARCHAR: LIKE/=. STRUCT: ponto (est.uf). Aspas duplas em colunas com espaços/acentos.
-- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio — e agrupe pelo alias (GROUP BY uf). NUNCA use GROUP BY est.uf ou ORDER BY est.* fora do SELECT original.
+- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio, est.cnae_principal as cnae, est.cnae_principal_codigo as cnae_cod, est.cnaes_secundarios_codigos as cnaes_sec — e agrupe pelo alias. NUNCA use est.* fora do SELECT onde o STRUCT foi acessado.
 - DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412. NUNCA divida por 100.
-- VALORES monetários são VARCHAR: SUM(CAST(REPLACE("VALOR PARCELA",',','.') AS DECIMAL))
+- VALORES monetários são VARCHAR: SUM(CAST(REPLACE(REPLACE(coluna,'.',''),',','.') AS DECIMAL)) — isso vale para "Valor Licitação", "VALOR TRANSFERIDO", "VALOR LIBERADO", "VALOR CONVÊNIO" e qualquer coluna monetária — NUNCA use DECIMAL(18,3) direto
 - LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
 - CTEs: não aplique CAST/REPLACE em colunas já computadas como DECIMAL
-- UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Em UNION com ORDER BY, use alias numérico (ORDER BY 1,2) ou nome de coluna simples — NUNCA expressão como CAST(MES AS INTEGER)
-- UNION com múltiplas tabelas (análise completa de CNPJ): todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
-- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio — e agrupe pelo alias (GROUP BY uf). NUNCA use est.* fora do SELECT onde o STRUCT foi acessado — nem em WHERE, nem em GROUP BY, nem em ORDER BY de queries externas
-- DUE DILIGENCE / ANÁLISE DE CNPJ: NUNCA use UNION entre tabelas com colunas diferentes. Use queries SEPARADAS por seção com SELECT 'SEÇÃO' as fonte, coluna1, coluna2 — mantenha EXATAMENTE 3 colunas em cada parte do UNION: fonte, campo, valor. MANTENHA SIMPLES: máximo 4 tabelas por query de due diligence para evitar timeout
+- UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Use alias numérico (ORDER BY 1,2) — NUNCA expressão como CAST(MES AS INTEGER)
+- UNION com múltiplas tabelas: todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
+- DUE DILIGENCE / ANÁLISE DE CNPJ: máximo 4 tabelas por UNION, 3 colunas fixas: fonte, campo, valor
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
 - SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
-- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR com formato DD/MM/YYYY ou 'Não informada'. Para filtrar por duração use: TRY_STRPTIME(DATA_INICIO_AFASTAMENTO, '%d/%m/%Y') — NUNCA TRY_CAST direto como DATE. NÃO existe "Início do afastamento" nem "Fim do afastamento"
-- CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO" — NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
-- CEIS/CNEP/CEAF: coluna de nome da empresa é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
-- ACORDOS: coluna de status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" (exatamente assim) — NÃO existe "SITUAÇÃO DO ACORDO". Coluna de nome é "RAZÃO SOCIAL – CADASTRO RECEITA" — NÃO existe "RAZÃO SOCIAL" sozinha
+- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR DD/MM/YYYY ou 'Não informada'. Use TRY_STRPTIME(col, '%d/%m/%Y') — NUNCA CAST direto. NÃO existe "Início do afastamento" nem "Fim do afastamento"
+- CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
+- CEIS/CNEP/CEAF: coluna de nome é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
+- ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" — NÃO existe "SITUAÇÃO DO ACORDO". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
+- strftime: NÃO use strftime() — use SUBSTRING(col,1,4) para ano, SUBSTRING(col,6,2) para mês em colunas DATE/VARCHAR. Para DATE→string use CAST(EXTRACT(YEAR FROM col) AS VARCHAR)
+- CEPIM: coluna é "CNPJ ENTIDADE" (VARCHAR) — JOIN com convenios via "CÓDIGO CONVENENTE" ou razao_social aproximado, NÃO por CNPJ direto pois formatos diferem
+- CNAES em array: cnaes_secundarios_codigos é VARCHAR[] — para filtrar use array_contains(est.cnaes_secundarios_codigos, '6201') NUNCA use LIKE em array
+- NÃO existem tabelas empresas_baixadas, empresas_inaptas, empresas_ativas — use _empresas_UF com filtro em est.situacao_cadastral
+- SERVIDORES pensionistas (_cadastro__4): colunas específicas CPF_REPRESENTANTE_LEGAL, CPF_INSTITUIDOR_PENSAO, TIPO_PENSAO, DATA_INICIO_PENSAO — NÃO tem ORGSUP_LOTACAO nem ORGSUP_EXERCICIO
+- DESPESAS: coluna de órgão em _despesas_favorecidos é "Nome Órgão Superior" — NÃO existe "NOME ÓRGÃO" nem "Órgão Superior" nessa tabela
+- WINDOW FUNCTIONS em CTE: alias computado (ex: total_gasto) NÃO pode ser usado em GROUP BY externo — use subconsulta ou repita a expressão
 
 == LIMITAÇÕES — RESPONDA EM PORTUGUÊS SEM GERAR SQL SE PERGUNTAR SOBRE ==
 - Judiciário (STF,STJ,TRF,TRT), Legislativo (Câmara,Senado,vereadores): NÃO estão nos dados — não tente SQL
@@ -221,6 +227,11 @@ function applySqlAutoFix(sql) {
   // _pep e _despesas: underscore errado em nomes de colunas
   s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
+  // Valores monetários com ponto de milhar + vírgula decimal
+  s = s.replace(/CAST\(REPLACE\("Valor Licitação",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("Valor Licitação",\'.\',\'\'),\',\',\'.\')');
+  s = s.replace(/CAST\(REPLACE\("VALOR TRANSFERIDO",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("VALOR TRANSFERIDO",\'.\',\'\'),\',\',\'.\')');
+  s = s.replace(/CAST\(REPLACE\("VALOR LIBERADO",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("VALOR LIBERADO",\'.\',\'\'),\',\',\'.\')');
+  s = s.replace(/CAST\(REPLACE\("VALOR CONVÊNIO",',' ,'\.'\)/g, 'CAST(REPLACE(REPLACE("VALOR CONVÊNIO",\'.\',\'\'),\',\',\'.\')');
   return s;
 }
 
