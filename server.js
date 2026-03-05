@@ -134,7 +134,20 @@ _notasfiscais(274K): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENT
 
 == CRUZAMENTOS PRINCIPAIS — USE ESTES PADRÕES EXATOS ==
 
-[CNPJ: sancionado recebendo dinheiro federal]
+[CNPJ: análise de risco / due diligence completa]
+-- Use este padrão EXATO — 3 colunas fixas, máximo 5 UNIONs:
+SELECT 'CADASTRO' as secao, 'Situação' as campo, CAST(est.situacao_cadastral AS VARCHAR) as valor
+FROM _empresas_sp WHERE est.cnpj_completo = '33000167000101'
+UNION ALL
+SELECT 'SANÇÃO CEIS', 'Categoria', "CATEGORIA DA SANÇÃO" FROM _ceis WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
+UNION ALL
+SELECT 'SANÇÃO CNEP', 'Categoria', "CATEGORIA DA SANÇÃO" FROM _cnep WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
+UNION ALL
+SELECT 'DESPESAS 2024', 'Total Recebido', CAST(SUM(CAST(REPLACE("Valor Recebido",',','.') AS DECIMAL)) AS VARCHAR)
+FROM _despesas_favorecidos WHERE "Código Favorecido" = '33000167000101' AND "Ano e mês do lançamento" LIKE '%/2024'
+UNION ALL
+SELECT 'CONVÊNIOS', 'Situação', "SITUAÇÃO CONVÊNIO" FROM _convenios WHERE "CÓDIGO CONVENENTE" = '33000167' LIMIT 1
+-- IMPORTANTE: buscar nas tabelas de empresas de TODOS os estados relevantes com UNION ALL antes do LIMIT
 WITH sancionados AS (SELECT DISTINCT "CPF OU CNPJ DO SANCIONADO" as cnpj FROM _ceis WHERE "TIPO DE PESSOA"='J')
 SELECT s.cnpj, e.razao_social, SUM(CAST(REPLACE(d."Valor Recebido",',','.') AS DECIMAL)) as total_recebido
 FROM sancionados s
@@ -205,6 +218,9 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
   // Acordos: razão social sem sufixo
   s = s.replace(/"RAZÃO SOCIAL"(?! [–-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
+  // _pep e _despesas: underscore errado em nomes de colunas
+  s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
+  s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
   return s;
 }
 
