@@ -15,14 +15,17 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 
 == REGRAS SQL ==
 - BIGINT: só operadores numéricos. VARCHAR: LIKE/=. STRUCT: ponto (est.uf). Aspas duplas em colunas com espaços/acentos.
-- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao — e agrupe pelo alias (GROUP BY uf). NUNCA use GROUP BY est.uf fora do SELECT original onde o STRUCT foi acessado.
+- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio — e agrupe pelo alias (GROUP BY uf). NUNCA use GROUP BY est.uf ou ORDER BY est.* fora do SELECT original.
 - DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412. NUNCA divida por 100.
 - VALORES monetários são VARCHAR: SUM(CAST(REPLACE("VALOR PARCELA",',','.') AS DECIMAL))
 - LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
 - CTEs: não aplique CAST/REPLACE em colunas já computadas como DECIMAL
-- UNION/UNION ALL: ORDER BY só no final, nunca dentro de subquery
+- UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Em UNION com ORDER BY, use alias numérico (ORDER BY 1,2) ou nome de coluna simples — NUNCA expressão como CAST(MES AS INTEGER)
+- UNION com múltiplas tabelas (análise completa de CNPJ): todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
 - SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
+- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR com formato DD/MM/YYYY ou 'Não informada'. Para filtrar por duração use: TRY_STRPTIME(DATA_INICIO_AFASTAMENTO, '%d/%m/%Y') — NUNCA TRY_CAST direto como DATE
+- CEIS/CNEP/CEAF: coluna de nome da empresa é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
 
 == LIMITAÇÕES — RESPONDA EM PORTUGUÊS SEM GERAR SQL SE PERGUNTAR SOBRE ==
 - Judiciário (STF,STJ,TRF,TRT), Legislativo (Câmara,Senado,vereadores): NÃO estão nos dados — não tente SQL
@@ -236,7 +239,7 @@ Responda APENAS com SQL puro — sem explicações, sem markdown, sem blocos de 
     console.log("💬 Claude explicando...");
     const explanation = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
-      max_tokens: 1500,
+      max_tokens: 2000,
       messages: [{
         role: "user",
         content: `Pergunta: "${query}"
