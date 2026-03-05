@@ -40,7 +40,7 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - CNAES em array: cnaes_secundarios_codigos é VARCHAR[] — para filtrar use array_contains(est.cnaes_secundarios_codigos, '6201') NUNCA use LIKE em array
 - NÃO existem tabelas empresas_baixadas, empresas_inaptas, empresas_ativas — use _empresas_UF com filtro em est.situacao_cadastral
 - SERVIDORES pensionistas (_cadastro__4): colunas específicas CPF_REPRESENTANTE_LEGAL, CPF_INSTITUIDOR_PENSAO, TIPO_PENSAO, DATA_INICIO_PENSAO — NÃO tem ORGSUP_LOTACAO nem ORGSUP_EXERCICIO
-- DESPESAS: coluna de órgão em _despesas_favorecidos é "Nome Órgão Superior" — NÃO existe "NOME ÓRGÃO" nem "Órgão Superior" nessa tabela
+- DESPESAS: _despesas_favorecidos → "Nome Órgão Superior". _despesasdiarias_despesas_empenho → "Órgão Superior" (sem "Nome"). _licitacoes → "Nome Órgão Superior" (com "Nome", case misto). NÃO misture os nomes entre tabelas
 - WINDOW FUNCTIONS em CTE: alias computado (ex: total_gasto) NÃO pode ser usado em GROUP BY externo — use subconsulta ou repita a expressão
 
 == LIMITAÇÕES — RESPONDA EM PORTUGUÊS SEM GERAR SQL SE PERGUNTAR SOBRE ==
@@ -235,8 +235,8 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
   // Pensionistas: coluna errada
   s = s.replace(/([^_])ORGSUP_LOTACAO(?!_)/g, '$1ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
-  // Despesas empenho: case errado no nome do órgão
-  s = s.replace(/"Nome Órgão Superior"/g, '"NOME ÓRGÃO SUPERIOR"');
+  // Despesas empenho: "Órgão Superior" (sem "Nome") — NÃO converter licitacoes que tem "Nome Órgão Superior"
+  // REMOVIDO: não converter "Nome Órgão Superior" pois _licitacoes usa exatamente esse nome
   // DATE com SUBSTRING: precisa cast para VARCHAR
   s = s.replace(/SUBSTRING\("DATA LANÇAMENTO",\s*1,\s*7\)/g, 'SUBSTRING(CAST("DATA LANÇAMENTO" AS VARCHAR),1,7)');
   s = s.replace(/SUBSTRING\(("Data Emissão"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
@@ -249,10 +249,14 @@ function applySqlAutoFix(sql) {
   ];
   for (const col of monetaryCols) {
     const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const single = new RegExp(`REPLACE\\(${escaped},\\s*'\\.',\\s*''\\)`, 'g');
-    s = s.replace(single, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
-    const comma = new RegExp(`REPLACE\\(${escaped},\\s*',',\\s*'\\.'\\)`, 'g');
-    s = s.replace(comma, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
+    // só aplica se ainda não tem REPLACE duplo
+    const alreadyDouble = new RegExp(`REPLACE\\(REPLACE\\(${escaped}`);
+    if (!alreadyDouble.test(s)) {
+      const single = new RegExp(`REPLACE\\(${escaped},\\s*'\\.',\\s*''\\)`, 'g');
+      s = s.replace(single, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
+      const comma = new RegExp(`REPLACE\\(${escaped},\\s*',',\\s*'\\.'\\)`, 'g');
+      s = s.replace(comma, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
+    }
   }
   return s;
 }
