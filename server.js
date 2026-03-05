@@ -23,7 +23,7 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Em UNION com ORDER BY, use alias numérico (ORDER BY 1,2) ou nome de coluna simples — NUNCA expressão como CAST(MES AS INTEGER)
 - UNION com múltiplas tabelas (análise completa de CNPJ): todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
 - EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio — e agrupe pelo alias (GROUP BY uf). NUNCA use est.* fora do SELECT onde o STRUCT foi acessado — nem em WHERE, nem em GROUP BY, nem em ORDER BY de queries externas
-- DUE DILIGENCE / ANÁLISE DE CNPJ: NUNCA use UNION entre tabelas com colunas diferentes. Use queries SEPARADAS por seção com SELECT 'SEÇÃO' as fonte, coluna1, coluna2 — mantenha EXATAMENTE 3 colunas em cada parte do UNION: fonte, campo, valor
+- DUE DILIGENCE / ANÁLISE DE CNPJ: NUNCA use UNION entre tabelas com colunas diferentes. Use queries SEPARADAS por seção com SELECT 'SEÇÃO' as fonte, coluna1, coluna2 — mantenha EXATAMENTE 3 colunas em cada parte do UNION: fonte, campo, valor. MANTENHA SIMPLES: máximo 4 tabelas por query de due diligence para evitar timeout
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
 - SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
 - AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR com formato DD/MM/YYYY ou 'Não informada'. Para filtrar por duração use: TRY_STRPTIME(DATA_INICIO_AFASTAMENTO, '%d/%m/%Y') — NUNCA TRY_CAST direto como DATE. NÃO existe "Início do afastamento" nem "Fim do afastamento"
@@ -220,7 +220,7 @@ app.post("/chat", async (req, res) => {
     console.log("🤖 Claude gerando SQL...");
 
     const sqlGen = await anthropic.messages.create({
-      model: "claude-sonnet-4-5-20250929",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 3500,
       messages: [{
         role: "user",
@@ -252,7 +252,7 @@ REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, 
       method: "POST",
       headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
       body: JSON.stringify({ sql }),
-      signal: AbortSignal.timeout(120000)
+      signal: AbortSignal.timeout(240000)
     });
 
     const data = await response.json();
