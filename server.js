@@ -1,4 +1,4 @@
-// server.js — BDC V6 (corrigido / HARDENED) — DuckDB SQL + AutoFix robusto
+// server.js — BDC V6 (corrigido / HARDENED v2) — DuckDB SQL + AutoFix MONETÁRIO blindado
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
@@ -39,37 +39,42 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - DESPESAS: coluna de órgão em _despesas_favorecidos é "Nome Órgão Superior" — NÃO existe "NOME ÓRGÃO" nem "Órgão Superior" nessa tabela
 - WINDOW FUNCTIONS em CTE: alias computado (ex: total_gasto) NÃO pode ser usado em GROUP BY externo — use subconsulta ou repita a expressão
 
-== LIMITAÇÕES — RESPONDA EM PORTUGUÊS SEM GERAR SQL SE PERGUNTAR SOBRE ==
-- Judiciário (STF,STJ,TRF,TRT), Legislativo (Câmara,Senado,vereadores): NÃO estão nos dados — não tente SQL
-- Servidores estaduais/municipais: NÃO estão nos dados — não tente SQL
-- CPF no BF/BPC é mascarado (***123456**): não cruza com RFB/PEP por CPF
-- MEI não é identificável: use porte='MICRO EMPRESA' como aproximação
-- Abono permanência: sem coluna dedicada
-
 == TABELAS ==
-(… mantenha seu catálogo completo aqui, como já está no seu arquivo …)
+(… mantenha seu catálogo completo aqui …)
 `;
 
-/* ========================= SQL AUTO-FIX (V6 HARDENED) ========================= */
+/* ========================= SQL AUTO-FIX (V6 HARDENED v2) ========================= */
 function applySqlAutoFix(sql) {
   let s = sql || "";
 
-  // Normaliza markdown / lixo comum
+  // Normaliza markdown / lixo
   s = s.replace(/```sql\s*/gi, "").replace(/```/g, "").trim();
 
-  /* 0) FIX CRÍTICO: CAST(REPLACE(REPLACE(REPLACE(... ) AS DECIMAL)) -> CAST(REPLACE(REPLACE(...)) AS DECIMAL) */
+  /* =====================================================================================
+     FIX CRÍTICO (SEU ERRO ATUAL): "AS DECIMAL" foi parar DENTRO do REPLACE, gerando:
+       REPLACE(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
+     ou com CAST em volta:
+       CAST(REPLACE(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL))
+     Isso é SQL inválido. A correção sempre vira:
+       CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
+     ===================================================================================== */
 
-  // Caso geral (captura o "AS DECIMAL" no lugar errado)
+  // A) Caso SEM CAST externo: REPLACE(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)  -> CAST(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)
   s = s.replace(
-    /CAST\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([^)]+?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)\s*\)/gi,
+    /REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([\s\S]*?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)/gi,
     "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
   );
 
-  // Variante com identificador mais complexo/aspas
+  // B) Caso COM CAST externo: CAST(REPLACE(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)) -> CAST(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)
   s = s.replace(
-    /CAST\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*("[^"]+"(?:\."[^"]+")?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)\s*\)/gi,
+    /CAST\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([\s\S]*?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)\s*\)/gi,
     "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
   );
+
+  // C) Variante quando Claude “empilha” CAST( CAST( ... AS DECIMAL ) ) ou CAST(... AS DECIMAL) AS DECIMAL
+  for (let i = 0; i < 3; i++) {
+    s = s.replace(/CAST\s*\(\s*CAST\s*\(\s*([\s\S]*?)\s+AS\s+DECIMAL\s*\)\s*\)/gi, "CAST($1 AS DECIMAL)");
+  }
 
   /* 1) COLUNAS INVENTADAS / NOMES ERRADOS */
   s = s.replace(/"Início do afastamento"/g, "DATA_INICIO_AFASTAMENTO");
@@ -85,7 +90,7 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
 
-  /* 2) VIAGENS: ANO EM VARCHAR (evita SUBSTRING errado + EXTRACT/DATE_PART em VARCHAR) */
+  /* 2) VIAGENS: ano em VARCHAR (evita SUBSTRING errado / EXTRACT em VARCHAR) */
   s = s.replace(
     /SUBSTRING\(\s*("[^"]+"\."Período - Data de início"|"Período - Data de início")\s*,\s*7\s*,\s*4\s*\)/g,
     "SUBSTRING($1, 1, 4)"
@@ -103,13 +108,12 @@ function applySqlAutoFix(sql) {
     /EXTRACT\s*\(\s*YEAR\s+FROM\s+("Período - Data de fim")\s*\)/gi,
     "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
   );
-
   s = s.replace(
     /date_part\s*\(\s*'year'\s*,\s*("Período - Data de início")\s*\)/gi,
     "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
   );
 
-  /* 3) MONETÁRIO: REPLACE quebrado / 4 argumentos / aspas faltando */
+  /* 3) MONETÁRIO: REPLACE quebrado / aspas faltando */
   // REPLACE(x,'.',) -> REPLACE(x,'.','')
   s = s.replace(/REPLACE\(\s*([^,]+)\s*,\s*'\.'\s*,\s*\)/g, "REPLACE($1,'.','')");
 
@@ -119,13 +123,14 @@ function applySqlAutoFix(sql) {
     "REPLACE(REPLACE($1,'.',''),',','.')"
   );
 
-  // CAST(REPLACE(col,'.',''),',','.') AS DECIMAL  -> CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
+  // Se por algum motivo apareceu: CAST(REPLACE(col,'.',''),',','.') AS DECIMAL  (4 args)
+  // -> CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
   s = s.replace(
     /CAST\(\s*REPLACE\(\s*([^,]+)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)/gi,
     "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
   );
 
-  /* 4) SANÇÕES: alias errado (c -> ci) quando Claude cria ci/cn */
+  /* 4) SANÇÕES: alias errado (c -> ci) */
   s = s.replace(/\bc\."CPF OU CNPJ DO SANCIONADO"\b/g, 'ci."CPF OU CNPJ DO SANCIONADO"');
   s = s.replace(/\bc\."NOME DO SANCIONADO"\b/g, 'ci."NOME DO SANCIONADO"');
   s = s.replace(/\bc\."CATEGORIA DA SANÇÃO"\b/g, 'ci."CATEGORIA DA SANÇÃO"');
@@ -137,7 +142,7 @@ function applySqlAutoFix(sql) {
   /* 6) UNION: remove ORDER BY antes de UNION */
   s = s.replace(/ORDER BY[\s\S]*?(?=\s+UNION\s+ALL|\s+UNION\s+)/gi, "");
 
-  /* 7) CEPIM x CONVÊNIOS: evita coluna inventada no _convenios */
+  /* 7) CEPIM x CONVÊNIOS: evita coluna inventada */
   s = s.replace(/c\."CNPJ ENTIDADE"/g, 'c."CÓDIGO CONVENENTE"');
   s = s.replace(/"CNPJ ENTIDADE"\s+AS\s+cnpj_entidade/gi, '"CÓDIGO CONVENENTE" AS codigo_convenente');
 
@@ -181,17 +186,11 @@ REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, 
     let sql = sqlGen.content.find((b) => b.type === "text")?.text?.trim() || "";
     sql = applySqlAutoFix(sql);
 
-    console.log(`📝 SQL (primeiros 300): ${sql.substring(0, 300)}`);
+    console.log(`📝 SQL (primeiros 350): ${sql.substring(0, 350)}`);
 
-    // Se Claude não entregou SQL (ex.: "não há dados"), devolve sem executar
     if (!isSqlLike(sql)) {
-      console.log("💬 Claude respondeu sem SQL (dado não disponível / limitação)");
-      return res.json({
-        answer: sql,
-        sql: "",
-        duration_ms: Date.now() - start,
-        rows_returned: 0,
-      });
+      console.log("💬 Claude respondeu sem SQL (limitação / sem dados)");
+      return res.json({ answer: sql, sql: "", duration_ms: Date.now() - start, rows_returned: 0 });
     }
 
     console.log("⚡ Executando no Hetzner...");
@@ -237,12 +236,7 @@ Formate valores monetários em R$. Cite a fonte dos dados.`,
     const answer = explanation.content.find((b) => b.type === "text")?.text || "Sem resposta";
     console.log(`✅ CONCLUÍDO em ${Date.now() - start}ms`);
 
-    return res.json({
-      answer,
-      sql,
-      duration_ms: Date.now() - start,
-      rows_returned: data.row_count,
-    });
+    return res.json({ answer, sql, duration_ms: Date.now() - start, rows_returned: data.row_count });
   } catch (err) {
     console.error("❌ ERRO:", err?.message || err);
     return res.status(500).json({ error: err?.message || String(err), duration_ms: Date.now() - start });
