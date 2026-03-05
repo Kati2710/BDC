@@ -68,7 +68,8 @@ _servidores_remuneracao(19M)+__2(30M)+__3(52M)+__4(237K)+__5(9M):
   ANO(VARCHAR),MES(VARCHAR),Id_SERVIDOR_PORTAL,CPF,NOME,"REMUNERAÇÃO BÁSICA BRUTA (R$)","ABATE-TETO (R$)","GRATIFICAÇÃO NATALINA (R$)","FÉRIAS (R$)","IRRF (R$)","PSS/RPGS (R$)","DEMAIS DEDUÇÕES (R$)","REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)","TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"
   ⚠️ SEM coluna de órgão — JOIN com _servidores_cadastro via Id_SERVIDOR_PORTAL para filtrar por órgão
 
-_servidores_afastamentos(84K)+__2(8M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO,DATA_FIM_AFASTAMENTO
+_servidores_afastamentos(84K)+__2(8M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO(VARCHAR),DATA_FIM_AFASTAMENTO(VARCHAR)
+  ⚠️ DATA_FIM_AFASTAMENTO pode conter 'Não informada' — NUNCA faça CAST direto. Use: WHERE DATA_FIM_AFASTAMENTO IS NULL OR DATA_FIM_AFASTAMENTO = 'Não informada' para afastamentos em aberto
 _servidores_honorarios_jetons_(45K): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,EMPRESA,VALOR
 _servidores_honorariosadvocaticios(1M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,OBSERVACOES,VALOR
 _servidores_observacoes(463K+__2..7): ANO,MES,Id_SERVIDOR_PORTAL,NOME,CPF,OBSERVACAO
@@ -106,7 +107,8 @@ _convenios(612K): "NÚMERO CONVÊNIO","UF","NOME MUNICÍPIO","SITUAÇÃO CONVÊN
 
 -- CARTÃO CORPORATIVO --
 Schema base cartão: "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT),"NOME ÓRGÃO SUPERIOR","CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","ANO EXTRATO"(BIGINT),"MÊS EXTRATO"(VARCHAR),"NOME FAVORECIDO","TRANSAÇÃO","DATA TRANSAÇÃO"(DATE),"VALOR TRANSAÇÃO"
-_cpgf(2M): +CPF PORTADOR,NOME PORTADOR,"CNPJ OU CPF FAVORECIDO"
+_cpgf(2M): +"CPF PORTADOR"(VARCHAR),"NOME PORTADOR","CNPJ OU CPF FAVORECIDO"(VARCHAR)
+  ⚠️ coluna chama "CPF PORTADOR" não CPF — JOIN com viagens: ON v."CPF viajante" = c."CPF PORTADOR"
 _cpcc(1M): +"TIPO AQUISIÇÃO","CNPJ OU CPF FAVORECIDO"(BIGINT)
 _cpdc(129K): +CPF PORTADOR,NOME PORTADOR,"CNPJ OU CPF FAVORECIDO","NÚMERO CONVÊNIO"(BIGINT),"NOME CONVENENTE"
 
@@ -151,17 +153,18 @@ ORDER BY CAST(REPLACE(j.VALOR,',','.') AS DECIMAL) DESC LIMIT 100
 [CNPJ: empresa baixada/inapta que ganhou licitação]
 -- ⚠️ _licitacoes não tem CNPJ — cruzar por razao_social é impreciso. Melhor via _despesas_favorecidos:
 WITH empresas_irregulares AS (
-  SELECT est.cnpj_completo as cnpj, razao_social, est.situacao_cadastral
+  SELECT est.cnpj_completo as cnpj, razao_social, est.situacao_cadastral, est.uf as estado
   FROM _empresas_sp WHERE est.situacao_cadastral IN ('BAIXADA','INAPTA','SUSPENSA')
-  UNION ALL SELECT est.cnpj_completo, razao_social, est.situacao_cadastral FROM _empresas_mg WHERE est.situacao_cadastral IN ('BAIXADA','INAPTA','SUSPENSA')
+  UNION ALL SELECT est.cnpj_completo, razao_social, est.situacao_cadastral, est.uf FROM _empresas_mg WHERE est.situacao_cadastral IN ('BAIXADA','INAPTA','SUSPENSA')
   -- repetir para outros estados relevantes
 )
-SELECT e.cnpj, e.razao_social, e.situacao_cadastral,
+SELECT e.cnpj, e.razao_social, e.situacao_cadastral, e.estado,
   SUM(CAST(REPLACE(d."Valor Recebido",',','.') AS DECIMAL)) as total_recebido
 FROM empresas_irregulares e
 JOIN _despesas_favorecidos d ON d."Código Favorecido" = e.cnpj
 WHERE d."Ano e mês do lançamento" LIKE '%/2024'
-GROUP BY e.cnpj, e.razao_social, e.situacao_cadastral ORDER BY total_recebido DESC LIMIT 100
+GROUP BY e.cnpj, e.razao_social, e.situacao_cadastral, e.estado ORDER BY total_recebido DESC LIMIT 100
+-- ⚠️ NUNCA use GROUP BY est.uf dentro de CTE — o alias est não existe fora do SELECT. Use alias explícito (ex: est.uf as estado) e agrupe pelo alias
 
 [CNPJ: empresa no CEIS + no CNEP (sanção dupla)]
 SELECT c.\"CPF OU CNPJ DO SANCIONADO\" as cnpj, c.\"NOME DO SANCIONADO\",
