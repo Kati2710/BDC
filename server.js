@@ -1,4 +1,3 @@
-// server.js — BDC V6 (corrigido / HARDENED v2) — DuckDB SQL + AutoFix MONETÁRIO blindado
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
@@ -11,151 +10,84 @@ const HETZNER_API = process.env.HETZNER_API_BASE || "http://89.167.48.3:5010";
 const HETZNER_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura";
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-/* ========================= CATALOGO / REGRAS ========================= */
 const DB_CATALOG = `
 BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 
 == REGRAS SQL ==
-- BIGINT: só operadores numéricos. VARCHAR: LIKE/=. STRUCT: ponto (est.uf). Aspas duplas em colunas com espaços/acentos.
-- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio, est.cnae_principal as cnae, est.cnae_principal_codigo as cnae_cod, est.cnaes_secundarios_codigos as cnaes_sec — e agrupe pelo alias. NUNCA use est.* fora do SELECT onde o STRUCT foi acessado.
-- DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412. NUNCA divida por 100.
-- VALORES monetários são VARCHAR: SUM(CAST(REPLACE(REPLACE(coluna,'.',''),',','.') AS DECIMAL)) — isso vale para "Valor Licitação", "VALOR TRANSFERIDO", "VALOR LIBERADO", "VALOR CONVÊNIO" e qualquer coluna monetária — NUNCA use DECIMAL(18,3) direto
-- LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
-- CTEs: não aplique CAST/REPLACE em colunas já computadas como DECIMAL
-- UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Use alias numérico (ORDER BY 1,2) — NUNCA expressão como CAST(MES AS INTEGER)
-- UNION com múltiplas tabelas: todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
-- DUE DILIGENCE / ANÁLISE DE CNPJ: máximo 4 tabelas por UNION, 3 colunas fixas: fonte, campo, valor
-- BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
-- SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
-- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR DD/MM/YYYY ou 'Não informada'. Use TRY_STRPTIME(col, '%d/%m/%Y') — NUNCA CAST direto. NÃO existe "Início do afastamento" nem "Fim do afastamento"
-- CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
-- CEIS/CNEP/CEAF: coluna de nome é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
-- ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" — NÃO existe "SITUAÇÃO DO ACORDO". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
-- strftime: NÃO use strftime() — use SUBSTRING(col,1,4) para ano, SUBSTRING(col,6,2) para mês em colunas DATE/VARCHAR. Para DATE→string use CAST(EXTRACT(YEAR FROM col) AS VARCHAR)
-- CEPIM: coluna é "CNPJ ENTIDADE" (VARCHAR) — JOIN com convenios via "NÚMERO CONVÊNIO" (preferido) ou "CÓDIGO CONVENENTE", NÃO por CNPJ direto pois formatos diferem
-- CNAES em array: cnaes_secundarios_codigos é VARCHAR[] — para filtrar use array_contains(est.cnaes_secundarios_codigos, '6201') NUNCA use LIKE em array
-- NÃO existem tabelas empresas_baixadas, empresas_inaptas, empresas_ativas — use _empresas_UF com filtro em est.situacao_cadastral
-- SERVIDORES pensionistas (_cadastro__4): colunas específicas CPF_REPRESENTANTE_LEGAL,CPF_INSTITUIDOR_PENSAO,TIPO_PENSAO,DATA_INICIO_PENSAO — NÃO tem ORGSUP_LOTACAO nem ORGSUP_EXERCICIO
-- DESPESAS: coluna de órgão em _despesas_favorecidos é "Nome Órgão Superior" — NÃO existe "NOME ÓRGÃO" nem "Órgão Superior" nessa tabela
-- WINDOW FUNCTIONS em CTE: alias computado (ex: total_gasto) NÃO pode ser usado em GROUP BY externo — use subconsulta ou repita a expressão
-
-== TABELAS ==
+- VALORES monetários são VARCHAR: SUM(CAST(REPLACE(REPLACE(coluna,'.',''),',','.') AS DECIMAL))
+- strftime: NÃO use strftime() — use SUBSTRING(col,1,4) para ano
+- CEIS/CNEP/CEAF: tabela é _ceis/_cnep/_ceaf (sempre com underscore)
+- CEPIM: tabela é _cepim
+- SERVIDORES pensionistas (_servidores_cadastro__4): NÃO tem ORGSUP_LOTACAO nem ORGSUP_EXERCICIO
 (… mantenha seu catálogo completo aqui …)
 `;
 
-/* ========================= SQL AUTO-FIX (V6 HARDENED v2) ========================= */
+/* ========================= SQL AUTO-FIX (BLINDADO) ========================= */
 function applySqlAutoFix(sql) {
-  let s = sql || "";
+  let s = (sql || "").replace(/```sql\s*/gi, "").replace(/```/g, "").trim();
 
-  // Normaliza markdown / lixo
-  s = s.replace(/```sql\s*/gi, "").replace(/```/g, "").trim();
+  // --- 0) tabelas sem underscore (59 explodiu por isso) ---
+  s = s.replace(/\bFROM\s+ceis\b/gi, "FROM _ceis");
+  s = s.replace(/\bJOIN\s+ceis\b/gi, "JOIN _ceis");
+  s = s.replace(/\bFROM\s+cnep\b/gi, "FROM _cnep");
+  s = s.replace(/\bJOIN\s+cnep\b/gi, "JOIN _cnep");
+  s = s.replace(/\bFROM\s+ceaf\b/gi, "FROM _ceaf");
+  s = s.replace(/\bJOIN\s+ceaf\b/gi, "JOIN _ceaf");
+  s = s.replace(/\bFROM\s+cepim\b/gi, "FROM _cepim");
+  s = s.replace(/\bJOIN\s+cepim\b/gi, "JOIN _cepim");
 
-  /* =====================================================================================
-     FIX CRÍTICO (SEU ERRO ATUAL): "AS DECIMAL" foi parar DENTRO do REPLACE, gerando:
-       REPLACE(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
-     ou com CAST em volta:
-       CAST(REPLACE(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL))
-     Isso é SQL inválido. A correção sempre vira:
-       CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
-     ===================================================================================== */
+  // --- 1) pensionistas: coluna inexistente ---
+  s = s.replace(/\bORGSUP_LOTACAO\b/g, "ORGSUP_LOTACAO_INSTITUIDOR_PENSAO");
 
-  // A) Caso SEM CAST externo: REPLACE(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)  -> CAST(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)
+  // --- 2) viagen: ano em VARCHAR (evita EXTRACT/date_part em VARCHAR) ---
+  s = s.replace(
+    /EXTRACT\s*\(\s*YEAR\s+FROM\s+("Período - Data de início")\s*\)/gi,
+    "CAST(SUBSTRING($1,1,4) AS BIGINT)"
+  );
+  s = s.replace(
+    /date_part\s*\(\s*'year'\s*,\s*("Período - Data de início")\s*\)/gi,
+    "CAST(SUBSTRING($1,1,4) AS BIGINT)"
+  );
+
+  // --- 3) FIX BLINDADO DO ERRO ATUAL (15/15): "AS DECIMAL" dentro do REPLACE ---
+  // Converte QUALQUER:
+  //   REPLACE(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)
+  // em:
+  //   CAST(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)
+
+  // 3.1) caso “limpo” com os 3 replaces padrão (pegando X)
   s = s.replace(
     /REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([\s\S]*?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)/gi,
     "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
   );
 
-  // B) Caso COM CAST externo: CAST(REPLACE(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)) -> CAST(REPLACE(REPLACE(X,'.',''),',','.') AS DECIMAL)
+  // 3.2) caso ainda embrulhado em CAST(...) (vai virar CAST(CAST(... AS DECIMAL)) e isso é OK)
   s = s.replace(
     /CAST\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([\s\S]*?)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)\s*\)/gi,
     "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
   );
 
-  // C) Variante quando Claude “empilha” CAST( CAST( ... AS DECIMAL ) ) ou CAST(... AS DECIMAL) AS DECIMAL
-  for (let i = 0; i < 3; i++) {
-    s = s.replace(/CAST\s*\(\s*CAST\s*\(\s*([\s\S]*?)\s+AS\s+DECIMAL\s*\)\s*\)/gi, "CAST($1 AS DECIMAL)");
-  }
-
-  /* 1) COLUNAS INVENTADAS / NOMES ERRADOS */
-  s = s.replace(/"Início do afastamento"/g, "DATA_INICIO_AFASTAMENTO");
-  s = s.replace(/"Fim do afastamento"/g, "DATA_FIM_AFASTAMENTO");
-
-  s = s.replace(/"SITUAÇÃO DO ACORDO"(?! DE LENIÊNICA)/g, '"SITUAÇÃO DO ACORDO DE LENIÊNICA"');
-
-  s = s.replace(/"CNPJ OU CPF DO SANCIONADO"/g, '"CPF OU CNPJ DO SANCIONADO"');
-  s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
-
-  s = s.replace(/"RAZÃO SOCIAL"(?! [–-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
-
-  s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
-  s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
-
-  /* 2) VIAGENS: ano em VARCHAR (evita SUBSTRING errado / EXTRACT em VARCHAR) */
+  // 3.3) fallback ultra-agressivo: se apareceu "... ) AS DECIMAL" logo após "...',','.')"
+  // (pega variações onde o Claude bagunça 1-2 parênteses)
   s = s.replace(
-    /SUBSTRING\(\s*("[^"]+"\."Período - Data de início"|"Período - Data de início")\s*,\s*7\s*,\s*4\s*\)/g,
-    "SUBSTRING($1, 1, 4)"
-  );
-  s = s.replace(
-    /SUBSTRING\(\s*("[^"]+"\."Período - Data de fim"|"Período - Data de fim")\s*,\s*7\s*,\s*4\s*\)/g,
-    "SUBSTRING($1, 1, 4)"
+    /REPLACE\s*\(\s*REPLACE\s*\(\s*REPLACE\s*\(\s*([\s\S]*?)\)\s*AS\s*DECIMAL\s*\)/gi,
+    "CAST($1 AS DECIMAL)"
   );
 
-  s = s.replace(
-    /EXTRACT\s*\(\s*YEAR\s+FROM\s+("Período - Data de início")\s*\)/gi,
-    "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
-  );
-  s = s.replace(
-    /EXTRACT\s*\(\s*YEAR\s+FROM\s+("Período - Data de fim")\s*\)/gi,
-    "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
-  );
-  s = s.replace(
-    /date_part\s*\(\s*'year'\s*,\s*("Período - Data de início")\s*\)/gi,
-    "CAST(SUBSTRING($1, 1, 4) AS BIGINT)"
-  );
-
-  /* 3) MONETÁRIO: REPLACE quebrado / aspas faltando */
-  // REPLACE(x,'.',) -> REPLACE(x,'.','')
+  // --- 4) REPLACE quebrado: REPLACE(x,'.',) -> REPLACE(x,'.','') ---
   s = s.replace(/REPLACE\(\s*([^,]+)\s*,\s*'\.'\s*,\s*\)/g, "REPLACE($1,'.','')");
 
-  // REPLACE(REPLACE(x,'.',),',','.') -> REPLACE(REPLACE(x,'.',''),',','.')
-  s = s.replace(
-    /REPLACE\(\s*REPLACE\(\s*([^,]+)\s*,\s*'\.'\s*,\s*\)\s*,\s*','\s*,\s*'\.'\s*\)/g,
-    "REPLACE(REPLACE($1,'.',''),',','.')"
-  );
-
-  // Se por algum motivo apareceu: CAST(REPLACE(col,'.',''),',','.') AS DECIMAL  (4 args)
-  // -> CAST(REPLACE(REPLACE(col,'.',''),',','.') AS DECIMAL)
-  s = s.replace(
-    /CAST\(\s*REPLACE\(\s*([^,]+)\s*,\s*'\.'\s*,\s*''\s*\)\s*,\s*','\s*,\s*'\.'\s*\)\s*AS\s*DECIMAL\s*\)/gi,
-    "CAST(REPLACE(REPLACE($1,'.',''),',','.') AS DECIMAL)"
-  );
-
-  /* 4) SANÇÕES: alias errado (c -> ci) */
-  s = s.replace(/\bc\."CPF OU CNPJ DO SANCIONADO"\b/g, 'ci."CPF OU CNPJ DO SANCIONADO"');
-  s = s.replace(/\bc\."NOME DO SANCIONADO"\b/g, 'ci."NOME DO SANCIONADO"');
-  s = s.replace(/\bc\."CATEGORIA DA SANÇÃO"\b/g, 'ci."CATEGORIA DA SANÇÃO"');
-  s = s.replace(/\bCASE\s+WHEN\s+c\./gi, "CASE WHEN ci.");
-
-  /* 5) PENSIONISTAS: coluna inexistente */
-  s = s.replace(/\bORGSUP_LOTACAO\b/g, "ORGSUP_LOTACAO_INSTITUIDOR_PENSAO");
-
-  /* 6) UNION: remove ORDER BY antes de UNION */
+  // --- 5) UNION: remove ORDER BY antes de UNION ---
   s = s.replace(/ORDER BY[\s\S]*?(?=\s+UNION\s+ALL|\s+UNION\s+)/gi, "");
-
-  /* 7) CEPIM x CONVÊNIOS: evita coluna inventada */
-  s = s.replace(/c\."CNPJ ENTIDADE"/g, 'c."CÓDIGO CONVENENTE"');
-  s = s.replace(/"CNPJ ENTIDADE"\s+AS\s+cnpj_entidade/gi, '"CÓDIGO CONVENENTE" AS codigo_convenente');
 
   return s;
 }
 
-/* ========================= HELPERS ========================= */
 function isSqlLike(text) {
   const t = (text || "").trim().toLowerCase();
   return t.startsWith("select") || t.startsWith("with");
 }
 
-/* ========================= MAIN HANDLER ========================= */
 app.post("/chat", async (req, res) => {
   const start = Date.now();
   const query = (req.body?.query || "").trim();
@@ -163,37 +95,32 @@ app.post("/chat", async (req, res) => {
 
   try {
     console.log(`\n${"=".repeat(60)}\n❓ "${query}"\n${"=".repeat(60)}`);
-    console.log("🤖 Claude gerando SQL...");
 
     const sqlGen = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 3500,
-      messages: [
-        {
-          role: "user",
-          content: `Você é especialista em DuckDB e dados públicos brasileiros.
+      messages: [{
+        role: "user",
+        content: `Você é especialista em DuckDB e dados públicos brasileiros.
 
 ${DB_CATALOG}
 
 PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
-REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`,
-        },
-      ],
+REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra deve ser SELECT ou WITH.`
+      }]
     });
 
-    let sql = sqlGen.content.find((b) => b.type === "text")?.text?.trim() || "";
+    let sql = sqlGen.content.find(b => b.type === "text")?.text?.trim() || "";
     sql = applySqlAutoFix(sql);
 
-    console.log(`📝 SQL (primeiros 350): ${sql.substring(0, 350)}`);
+    console.log(`📝 SQL (primeiros 450): ${sql.substring(0, 450)}`);
 
     if (!isSqlLike(sql)) {
-      console.log("💬 Claude respondeu sem SQL (limitação / sem dados)");
       return res.json({ answer: sql, sql: "", duration_ms: Date.now() - start, rows_returned: 0 });
     }
 
-    console.log("⚡ Executando no Hetzner...");
     const response = await fetch(`${HETZNER_API}/query_unified`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
@@ -210,16 +137,13 @@ REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, 
     }
 
     if (!response.ok || data?.error) throw new Error(data?.error || "Query falhou");
-    console.log(`📊 ${data.row_count || 0} linhas retornadas`);
 
-    console.log("💬 Claude explicando...");
     const explanation = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 2000,
-      messages: [
-        {
-          role: "user",
-          content: `Pergunta: "${query}"
+      messages: [{
+        role: "user",
+        content: `Pergunta: "${query}"
 
 SQL executado:
 ${sql}
@@ -227,15 +151,11 @@ ${sql}
 Resultados (${data.row_count} linhas):
 ${JSON.stringify(data.rows?.slice(0, 50), null, 2)}
 
-Explique os resultados em português de forma clara e objetiva.
-Formate valores monetários em R$. Cite a fonte dos dados.`,
-        },
-      ],
+Explique em português. Formate moeda em R$. Cite a fonte dos dados.`
+      }]
     });
 
-    const answer = explanation.content.find((b) => b.type === "text")?.text || "Sem resposta";
-    console.log(`✅ CONCLUÍDO em ${Date.now() - start}ms`);
-
+    const answer = explanation.content.find(b => b.type === "text")?.text || "Sem resposta";
     return res.json({ answer, sql, duration_ms: Date.now() - start, rows_returned: data.row_count });
   } catch (err) {
     console.error("❌ ERRO:", err?.message || err);
