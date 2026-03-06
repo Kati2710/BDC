@@ -224,8 +224,29 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 == LIMITAÇÕES — RESPONDA EM PORTUGUÊS SEM GERAR SQL SE PERGUNTAR SOBRE ==
 - Judiciário (STF,STJ,TRF,TRT), Legislativo (Câmara,Senado,vereadores): NÃO estão nos dados
 - Servidores estaduais/municipais: NÃO estão nos dados
-- CPF no BF/BPC é mascarado (***123456**): não cruza com RFB/PEP por CPF
 - MEI não é identificável: use porte='MICRO EMPRESA' como aproximação
+
+== CPF — REGRAS CRÍTICAS ==
+CPF MASCARADO (formato ***123456** — NÃO PODE ser usado em JOIN):
+  _bolsafamilia_pagamentos, _bolsafamilia_saques, _novobolsafamilia, _auxiliobrasil,
+  _bpc, _auxilioemergencial, _segurodefeso, _garantiasafra, _pedemeia, _peti, _auxilioreconstrucao
+  ⚠️ NUNCA tente cruzar programas sociais com _pep, _servidores_*, _ceis, _cnep por CPF — impossível
+
+CPF COMPLETO (pode ser usado em JOIN):
+  _pep, _servidores_cadastro (e __2..7), _servidores_remuneracao (e __2..5),
+  _servidores_afastamentos, _servidores_honorarios_jetons_,
+  _cpgf, _cpcc, _cpdc, _viagens_viagem,
+  _ceis (pessoas físicas), _cnep, _ceaf, _imoveisfuncionais
+
+CRUZAMENTOS VÁLIDOS POR CPF:
+  ✅ _pep × _despesas_favorecidos (via "Código Favorecido" = CPF do PEP)
+  ✅ _pep × _viagens_viagem (via "CPF viajante")
+  ✅ _pep × _cpgf (via "CPF PORTADOR")
+  ✅ _servidores_cadastro × _servidores_remuneracao (via Id_SERVIDOR_PORTAL)
+  ✅ _servidores_cadastro × _viagens_viagem (via CPF)
+  ✅ _servidores_cadastro × _cpgf (via CPF = "CPF PORTADOR")
+  ✅ _ceaf × _servidores_cadastro (via CPF — CEAF sanciona servidores)
+  ❌ NUNCA cruze por NOME — nomes têm variações, abreviações e homônimos. Sempre use CPF ou CNPJ.
 
 == TABELAS ==
 
