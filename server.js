@@ -108,7 +108,7 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - DUE DILIGENCE / ANÁLISE DE CNPJ: máximo 4 tabelas por UNION, 3 colunas fixas: fonte, campo, valor
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
 - SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
-- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR DD/MM/YYYY ou 'Não informada'. Use TRY_STRPTIME(col, '%d/%m/%Y') — NUNCA CAST direto. NÃO existe "Início do afastamento" nem "Fim do afastamento"
+- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR com formatos MISTOS ('DD/MM/YYYY' ou 'YYYY-MM-DD'). Use SEMPRE COALESCE dos dois formatos: COALESCE(TRY_STRPTIME(col,'%d/%m/%Y'), TRY_STRPTIME(col,'%Y-%m-%d')) — NUNCA use um único formato pois causará parse error. Para afastamentos em aberto: DATA_FIM_AFASTAMENTO IS NULL OR DATA_FIM_AFASTAMENTO = 'Não informada'. NÃO existe "Início do afastamento" nem "Fim do afastamento"
 - CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
 - CEIS/CNEP/CEAF: coluna de nome é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
 - ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" — NÃO existe "SITUAÇÃO DO ACORDO". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
@@ -305,7 +305,12 @@ ORDER BY CAST(REPLACE(r."REMUNERAÇÃO BÁSICA BRUTA (R$)",',','.') AS DECIMAL) 
 function applySqlAutoFix(sql) {
   let s = sql || "";
 
-  // Corrige REPLACE(col,'.',) malformado (sem o '' final) → REPLACE duplo correto
+  // Afastamentos: TRY_STRPTIME com formato único → COALESCE dos dois formatos
+  s = s.replace(/TRY_STRPTIME\(([^,]+),\s*'%d\/%m\/%Y'\)/g,
+    `COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))`);
+  s = s.replace(/TRY_STRPTIME\(([^,]+),\s*'%Y-%m-%d'\)/g,
+    `COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))`);
+
   s = s.replace(/REPLACE\(("(?:[^"]+)"),\s*'\.',\s*\)/g,
     `REPLACE(REPLACE($1, '.', ''), ',', '.')`);
   // Corrige REPLACE(col,',',) malformado
