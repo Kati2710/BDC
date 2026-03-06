@@ -117,6 +117,7 @@ BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
 - DATAS DATE (não VARCHAR): para extrair ano de coluna DATE use CAST(EXTRACT(YEAR FROM col) AS VARCHAR) ou SUBSTRING(CAST(col AS VARCHAR),1,4) — NUNCA SUBSTRING direto em DATE
 - WINDOW FUNCTIONS: NUNCA use funções de janela (OVER()) em WHERE. Use QUALIFY ou subconsulta
 - SERVIDORES pensionistas (_cadastro__4): coluna de órgão chama ORGSUP_LOTACAO_INSTITUIDOR_PENSAO — NÃO existe ORGSUP_LOTACAO nessa tabela
+- SERVIDORES cadastro (_servidores_cadastro): coluna de órgão chama ORGSUP_LOTACAO e ORGSUP_EXERCICIO — NÃO existe ORGSUP_LOTACAO_INSTITUIDOR_PENSAO nessa tabela
 - DESPESAS empenho (_despesasdiarias_despesas_empenho): coluna órgão é "Órgão Superior" e "NOME ÓRGÃO SUPERIOR" — NÃO é "Nome Órgão Superior"
 - CEPIM: JOIN com outras tabelas via CNPJ é impreciso pois "CNPJ ENTIDADE" no CEPIM é apenas o CNPJ base (8 dígitos) sem filial. Para cruzar com _convenios use "CÓDIGO CONVENENTE" LIKE c."CNPJ ENTIDADE" || '%'
 - CEPIM: coluna é "CNPJ ENTIDADE" (VARCHAR) — JOIN com convenios via "CÓDIGO CONVENENTE" ou razao_social aproximado, NÃO por CNPJ direto pois formatos diferem
@@ -324,8 +325,9 @@ function applySqlAutoFix(sql) {
   // _pep: underscore errado
   s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
   s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
-  // Pensionistas: coluna errada
-  s = s.replace(/([^_])ORGSUP_LOTACAO(?!_)/g, '$1ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
+  // Pensionistas: só substitui se contexto explícito da tabela _cadastro__4
+  s = s.replace(/(_cadastro__4\b.*?)ORGSUP_LOTACAO(?!_INSTITUIDOR)/gs,
+    '$1ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
   // Despesas empenho: "Órgão Superior" (sem "Nome") — NÃO converter licitacoes que tem "Nome Órgão Superior"
   // REMOVIDO: não converter "Nome Órgão Superior" pois _licitacoes usa exatamente esse nome
   // DATE com SUBSTRING: precisa cast para VARCHAR
