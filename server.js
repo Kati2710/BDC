@@ -302,6 +302,14 @@ ORDER BY CAST(REPLACE(r."REMUNERAÇÃO BÁSICA BRUTA (R$)",',','.') AS DECIMAL) 
 /* ========================= SQL AUTO-FIX ========================= */
 function applySqlAutoFix(sql) {
   let s = sql || "";
+
+  // Corrige REPLACE(col,'.',) malformado (sem o '' final) → REPLACE duplo correto
+  s = s.replace(/REPLACE\(("(?:[^"]+)"),\s*'\.',\s*\)/g,
+    `REPLACE(REPLACE($1, '.', ''), ',', '.')`);
+  // Corrige REPLACE(col,',',) malformado
+  s = s.replace(/REPLACE\(("(?:[^"]+)"),\s*',',\s*\)/g,
+    `REPLACE(REPLACE($1, '.', ''), ',', '.')`);
+
   // Afastamentos: colunas inventadas
   s = s.replace(/"Início do afastamento"/g, "DATA_INICIO_AFASTAMENTO");
   s = s.replace(/"Fim do afastamento"/g, "DATA_FIM_AFASTAMENTO");
