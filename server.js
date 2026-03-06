@@ -8,7 +8,90 @@ app.use(express.json({ limit: "1mb" }));
 
 const HETZNER_API = process.env.HETZNER_API_BASE || "http://89.167.48.3:5010";
 const HETZNER_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura";
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic   = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const TAVILY_KEY  = process.env.TAVILY_API_KEY   || "";
+const S2_KEY      = process.env.S2_API_KEY        || "luDwHjoEjo9o0YcfcNi4J6f88oXQ9Um7VQkWCncj";
+
+/* ─── TAVILY WEB SEARCH ─── */
+async function tavilySearch(query, maxResults = 5) {
+  if (!TAVILY_KEY) return null;
+  try {
+    const res = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: TAVILY_KEY,
+        query,
+        max_results: maxResults,
+        search_depth: "advanced",
+        include_answer: true,
+        include_domains: [
+          "portaldatransparencia.gov.br", "cgu.gov.br", "rfb.gov.br",
+          "gov.br", "ibge.gov.br", "bcb.gov.br", "tcu.gov.br",
+          "g1.globo.com", "uol.com.br", "valor.com.br", "agenciabrasil.ebc.com.br"
+        ]
+      }),
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return {
+      answer: d.answer || null,
+      results: (d.results || []).map(r => ({
+        title: r.title, url: r.url,
+        content: r.content?.slice(0, 500),
+        published_date: r.published_date || null
+      }))
+    };
+  } catch (e) {
+    console.warn("⚠️ Tavily erro:", e.message);
+    return null;
+  }
+}
+
+/* ─── SEMANTIC SCHOLAR ─── */
+async function s2Search(query, limit = 5) {
+  try {
+    const params = new URLSearchParams({
+      query,
+      limit,
+      fields: "title,authors,year,abstract,externalIds,openAccessPdf,citationCount"
+    });
+    const res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/search?${params}`, {
+      headers: { "x-api-key": S2_KEY },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return (d.data || []).slice(0, limit).map(p => ({
+      title: p.title,
+      authors: (p.authors || []).slice(0, 3).map(a => a.name).join(", "),
+      year: p.year,
+      abstract: p.abstract?.slice(0, 400),
+      url: p.openAccessPdf?.url || `https://www.semanticscholar.org/paper/${p.paperId}`,
+      citations: p.citationCount || 0
+    }));
+  } catch (e) {
+    console.warn("⚠️ S2 erro:", e.message);
+    return null;
+  }
+}
+
+/* ─── DETECTA SE QUERY PRECISA DE CONTEXTO EXTERNO ─── */
+function needsExternalContext(query, rowCount, sql) {
+  const q = query.toLowerCase();
+  // Precisa de web search se: sem resultados OU pergunta sobre contexto/notícia/análise
+  const noData = rowCount === 0;
+  const contextKeywords = ["escândalo", "investigação", "cpi", "operação", "notícia", "recente",
+    "contexto", "histórico", "por que", "análise", "impacto", "consequência",
+    "processo", "denúncia", "acusação", "preso", "condenado"];
+  const hasContextKw = contextKeywords.some(k => q.includes(k));
+  // Precisa de S2 se: pergunta acadêmica ou de setor
+  const s2Keywords = ["estudo", "pesquisa", "artigo", "literatura", "acadêmico",
+    "setor", "indústria", "correlação", "evidência", "análise setorial"];
+  const hasS2Kw = s2Keywords.some(k => q.includes(k));
+  return { needsWeb: noData || hasContextKw, needsS2: hasS2Kw };
+}
 
 const DB_CATALOG = `
 BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
@@ -294,11 +377,24 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
     sql = applySqlAutoFix(sql);
     console.log(`📝 SQL: ${sql.substring(0, 300)}`);
 
-    // Se Claude retornou explicação em vez de SQL, devolve direto sem executar
+    // Se Claude retornou explicação em vez de SQL, tenta web search como fallback
     const sqlLower = sql.toLowerCase();
     if (!sqlLower.startsWith("select") && !sqlLower.startsWith("with")) {
-      console.log("💬 Claude respondeu sem SQL (dado não disponível)");
-      return res.json({ answer: sql, sql: "", duration_ms: Date.now() - start, rows_returned: 0 });
+      console.log("💬 Claude respondeu sem SQL — tentando contexto web...");
+      let fallbackAnswer = sql;
+      if (TAVILY_KEY) {
+        const web = await tavilySearch(query, 4);
+        if (web?.results?.length) {
+          const webCtx = web.results.map((r,i) => `[${i+1}] ${r.title}\nURL: ${r.url}\n${r.content||""}`).join("\n\n");
+          const fallback = await anthropic.messages.create({
+            model: "claude-sonnet-4-5-20250929",
+            max_tokens: 1500,
+            messages: [{ role: "user", content: `Pergunta: "${query}"\n\nOs dados não estão na base BDC. Use o contexto web abaixo para responder. Cite as fontes [1],[2] etc e inclua seção ## Fontes.\n\n${webCtx}` }]
+          });
+          fallbackAnswer = fallback.content.find(b => b.type==="text")?.text || sql;
+        }
+      }
+      return res.json({ answer: fallbackAnswer, sql: "", duration_ms: Date.now() - start, rows_returned: 0 });
     }
 
     console.log("⚡ Executando...");
@@ -313,7 +409,71 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
     if (!response.ok || data.error) throw new Error(data.error || "Query falhou");
     console.log(`📊 ${data.row_count || 0} linhas retornadas`);
 
+    // ── CONTEXTO EXTERNO: web search + Semantic Scholar quando necessário ──
+    const { needsWeb, needsS2 } = needsExternalContext(query, data.row_count || 0, sql);
+    let webContext = null, s2Context = null;
+
+    if (needsWeb && TAVILY_KEY) {
+      console.log("🌐 Tavily buscando contexto web...");
+      webContext = await tavilySearch(query);
+      if (webContext) console.log(`🌐 Tavily: ${webContext.results.length} resultados`);
+    }
+    if (needsS2) {
+      console.log("📚 Semantic Scholar buscando literatura...");
+      s2Context = await s2Search(query);
+      if (s2Context) console.log(`📚 S2: ${s2Context.length} artigos`);
+    }
+
+    const webSection = webContext ? `
+
+CONTEXTO WEB (Tavily — use para enriquecer a resposta e adicionar às Fontes):
+${webContext.answer ? `Resumo: ${webContext.answer}\n` : ""}${webContext.results.map((r,i) => `[W${i+1}] ${r.title}\n     URL: ${r.url}\n     ${r.content || ""}`).join("\n")}` : "";
+
+    const s2Section = s2Context?.length ? `
+
+LITERATURA ACADÊMICA (Semantic Scholar — cite quando relevante):
+${s2Context.map((p,i) => `[A${i+1}] ${p.title} (${p.year}) — ${p.authors}\n     ${p.abstract || ""}\n     URL: ${p.url} | Citações: ${p.citations}`).join("\n\n")}` : "";
+
     console.log("💬 Claude explicando...");
+    const explanation = await anthropic.messages.create({
+      model: "claude-sonnet-4-5-20250929",
+      max_tokens: 2500,
+      messages: [{
+        role: "user",
+        content: `Você é um analista de dados públicos brasileiros. Responda à pergunta abaixo integrando TODAS as fontes disponíveis: dados do banco BDC, contexto web e literatura acadêmica quando presentes.
+
+PERGUNTA: "${query}"
+
+SQL EXECUTADO:
+${sql}
+
+RESULTADOS DO BANCO BDC (${data.row_count} linhas):
+${JSON.stringify(data.rows?.slice(0, 50), null, 2)}${webSection}${s2Section}
+
+REGRAS OBRIGATÓRIAS:
+
+1. Cite cada fonte UMA VEZ com [N] na primeira vez que a usa — não repita a mesma citação em cada frase.
+2. Ao final, seção "## Fontes" com cada citação numerada e detalhada.
+3. Colunas de auditoria nos resultados (_audit_url_origem, _audit_data_publicacao, _audit_arquivo_origem): USE-AS para construir citações exatas.
+4. Resultados web [W1],[W2]...: cite como fonte complementar quando usados.
+5. Artigos acadêmicos [A1],[A2]...: cite quando enriquecerem a análise.
+6. Se o banco retornou 0 linhas mas há contexto web, responda com base no contexto web e explique que o dado específico não está na base BDC.
+
+MAPEAMENTO TABELAS → INSTITUIÇÕES:
+- _ceis, _cnep, _ceaf, _cepim, _acordos → CGU – Portal da Transparência
+- _pep → CGU – Pessoas Politicamente Expostas
+- _bolsafamilia*, _novobolsafamilia, _bpc, _auxilioemergencial → MDS
+- _servidores_* → SEGES/MGI
+- _viagens_*, _cpgf* → CGU – Portal da Transparência
+- _despesas_*, _despesasdiarias_* → SOF/STN – SIAFI
+- _convenios* → CGU – SICONV/Transferegov
+- _licitacoes*, _compras* → SEGES – Portal de Compras
+- _empresas_* → RFB – Receita Federal (CNPJ)
+- _renuncias* → SOF – Secretaria de Orçamento Federal
+
+Formate valores em R$. Seja preciso e objetivo.`
+      }]
+    });
     const explanation = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 2000,
@@ -364,12 +524,90 @@ Formate valores em R$. Seja preciso e objetivo.`
     const answer = explanation.content.find(b => b.type === "text")?.text || "Sem resposta";
     console.log(`✅ CONCLUÍDO em ${Date.now() - start}ms`);
 
-    return res.json({ answer, sql, duration_ms: Date.now() - start, rows_returned: data.row_count });
+    // Auto-save conversa (não bloqueia resposta)
+    const convId   = req.body?.conv_id || null;
+    const userEmail= req.body?.user    || "anonymous";
+    let   savedConvId = convId;
+    (async () => {
+      try {
+        // Salva pergunta do usuário
+        const r1 = await fetch(`${HETZNER_API}/conversations/message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
+          body: JSON.stringify({ user: userEmail, conv_id: convId, role: "user", content: query })
+        });
+        const d1 = await r1.json();
+        savedConvId = d1.conv_id;
+        // Salva resposta do assistente
+        await fetch(`${HETZNER_API}/conversations/message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
+          body: JSON.stringify({
+            user: userEmail, conv_id: savedConvId, role: "assistant",
+            content: answer, sql_used: sql,
+            row_count: data.row_count || 0, duration_ms: Date.now() - start
+          })
+        });
+        console.log(`💾 Salvo conv_id: ${savedConvId}`);
+      } catch(e) { console.warn("⚠️ Erro ao salvar conversa:", e.message); }
+    })();
+
+    return res.json({ answer, sql, duration_ms: Date.now() - start, rows_returned: data.row_count, conv_id: savedConvId });
 
   } catch (err) {
     console.error("❌ ERRO:", err.message);
     return res.status(500).json({ error: err.message, duration_ms: Date.now() - start });
   }
+});
+
+/* ========================= CONVERSATIONS PROXY ========================= */
+
+// Lista conversas do usuário
+app.get("/conversations", async (req, res) => {
+  try {
+    const user = req.query.user || "";
+    const r = await fetch(`${HETZNER_API}/conversations?user=${encodeURIComponent(user)}`, {
+      headers: { "X-API-Key": HETZNER_KEY }
+    });
+    const d = await r.json();
+    res.json(d);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Busca mensagens de uma conversa
+app.get("/conversations/:id", async (req, res) => {
+  try {
+    const r = await fetch(`${HETZNER_API}/conversations/${req.params.id}`, {
+      headers: { "X-API-Key": HETZNER_KEY }
+    });
+    const d = await r.json();
+    res.json(d);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Salva mensagem
+app.post("/conversations/message", async (req, res) => {
+  try {
+    const r = await fetch(`${HETZNER_API}/conversations/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
+      body: JSON.stringify(req.body)
+    });
+    const d = await r.json();
+    res.json(d);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Deleta conversa
+app.delete("/conversations/:id", async (req, res) => {
+  try {
+    const r = await fetch(`${HETZNER_API}/conversations/${req.params.id}`, {
+      method: "DELETE",
+      headers: { "X-API-Key": HETZNER_KEY }
+    });
+    const d = await r.json();
+    res.json(d);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/health", async (_, res) => {
