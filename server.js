@@ -264,6 +264,13 @@ _servidores_cadastro__7(52M—militares ativos): SITUACAO_VINCULO='CEDIDO SUS/LE
 _servidores_remuneracao(19M)+__2(30M)+__3(52M)+__4(237K)+__5(9M):
   ANO(VARCHAR),MES(VARCHAR),Id_SERVIDOR_PORTAL,CPF,NOME,"REMUNERAÇÃO BÁSICA BRUTA (R$)","ABATE-TETO (R$)","GRATIFICAÇÃO NATALINA (R$)","FÉRIAS (R$)","IRRF (R$)","PSS/RPGS (R$)","DEMAIS DEDUÇÕES (R$)","REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)","TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"
   ⚠️ SEM coluna de órgão — JOIN com _servidores_cadastro via Id_SERVIDOR_PORTAL
+  ⚠️ COBERTURA TOTAL: para rankings de remuneração use UNION ALL de TODAS as 5 tabelas:
+  SELECT * FROM _servidores_remuneracao WHERE ANO='2024' AND MES='12'
+  UNION ALL SELECT * FROM _servidores_remuneracao__2 WHERE ANO='2024' AND MES='12'
+  UNION ALL SELECT * FROM _servidores_remuneracao__3 WHERE ANO='2024' AND MES='12'
+  UNION ALL SELECT * FROM _servidores_remuneracao__4 WHERE ANO='2024' AND MES='12'
+  UNION ALL SELECT * FROM _servidores_remuneracao__5 WHERE ANO='2024' AND MES='12'
+  — NÃO consulte só _servidores_remuneracao pois cobre apenas civis sem vínculo especial
 
 _servidores_afastamentos(84K)+__2(8M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO(VARCHAR),DATA_FIM_AFASTAMENTO(VARCHAR)
 _servidores_honorarios_jetons_(45K): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,EMPRESA,VALOR
@@ -304,7 +311,8 @@ _cpcc(1M): +"TIPO AQUISIÇÃO","CNPJ OU CPF FAVORECIDO"(BIGINT)
 _cpdc(129K): +"CPF PORTADOR","NOME PORTADOR","CNPJ OU CPF FAVORECIDO","NÚMERO CONVÊNIO"(BIGINT),"NOME CONVENENTE"
 
 -- OUTROS --
-_pep(71K): CPF,"Nome_PEP","Descrição_Função","Nome_Órgão","Data_Início_Exercício"(DATE),"Data_Fim_Exercício","Data_Fim_Carência"
+_pep(71K): CPF,"Nome_PEP","Descrição_Função","Nome_Órgão","Data_Início_Exercício"(DATE),"Data_Fim_Exercício"(VARCHAR—pode ser NULL ou string vazia),"Data_Fim_Carência"(VARCHAR)
+  ⚠️ _pep: "Data_Fim_Exercício" e "Data_Fim_Carência" são VARCHAR — NUNCA compare com DATE diretamente. Para filtrar ativos em 2024: WHERE "Data_Início_Exercício" <= '2024-12-31' AND ("Data_Fim_Exercício" IS NULL OR "Data_Fim_Exercício" = '' OR "Data_Fim_Exercício" >= '2024-01-01')
 _imoveisfuncionais(23K): "NOME PERMISSIONÁRIO",CPF,"ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO","DATA INÍCIO OCUPAÇÃO"(DATE)
 _orçamentodadespesa(305K): "EXERCÍCIO"(BIGINT),"NOME ÓRGÃO SUPERIOR","NOME FUNÇÃO","NOME PROGRAMA ORÇAMENTÁRIO","NOME AÇÃO","ORÇAMENTO INICIAL (R$)","ORÇAMENTO EMPENHADO (R$)","ORÇAMENTO REALIZADO (R$)"
 _execuçãodareceita(2M): "CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","CATEGORIA ECONÔMICA","ORIGEM RECEITA","VALOR PREVISTO ATUALIZADO","VALOR REALIZADO","DATA LANÇAMENTO"(DATE),"ANO EXERCÍCIO"(BIGINT)
@@ -317,13 +325,37 @@ _notasfiscais(274K): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENT
 == CRUZAMENTOS PRINCIPAIS ==
 
 [CNPJ: due diligence]
-SELECT 'CADASTRO' as secao, 'Situação' as campo, CAST(est.situacao_cadastral AS VARCHAR) as valor
-FROM _empresas_sp WHERE est.cnpj_completo = '33000167000101'
-UNION ALL SELECT 'SANÇÃO CEIS', 'Categoria', "CATEGORIA DA SANÇÃO" FROM _ceis WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
-UNION ALL SELECT 'SANÇÃO CNEP', 'Categoria', "CATEGORIA DA SANÇÃO" FROM _cnep WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
-UNION ALL SELECT 'DESPESAS 2024', 'Total Recebido', CAST(SUM(CAST(REPLACE("Valor Recebido",',','.') AS DECIMAL)) AS VARCHAR)
-FROM _despesas_favorecidos WHERE "Código Favorecido" = '33000167000101' AND "Ano e mês do lançamento" LIKE '%/2024'
-UNION ALL SELECT 'CONVÊNIOS', 'Situação', "SITUAÇÃO CONVÊNIO" FROM _convenios WHERE "CÓDIGO CONVENENTE" = '33000167' LIMIT 1
+-- REGRA: busca cadastro em TODAS as UFs via UNION ALL antes do LIMIT 1 — empresa pode estar em qualquer estado
+-- REGRA: máximo 5 blocos no UNION para manter performance — NÃO adicione mais tabelas
+WITH cadastro AS (
+  SELECT est.situacao_cadastral as sit, razao_social, est.uf, est.municipio, est.cnae_principal
+  FROM _empresas_sp WHERE est.cnpj_completo = '33000167000101'
+  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_rj WHERE est.cnpj_completo = '33000167000101'
+  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_mg WHERE est.cnpj_completo = '33000167000101'
+  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_rs WHERE est.cnpj_completo = '33000167000101'
+  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_pr WHERE est.cnpj_completo = '33000167000101'
+  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_ba WHERE est.cnpj_completo = '33000167000101'
+  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_df WHERE est.cnpj_completo = '33000167000101'
+  LIMIT 1
+)
+SELECT 'CADASTRO RFB' as secao, 'Razão Social / Situação / UF' as campo,
+  COALESCE(razao_social,'NÃO ENCONTRADO') || ' | ' || COALESCE(CAST(sit AS VARCHAR),'?') || ' | ' || COALESCE(uf,'?') as valor
+FROM cadastro
+UNION ALL
+SELECT 'SANÇÃO CEIS', 'Categoria / Órgão', "CATEGORIA DA SANÇÃO" || ' | ' || "ÓRGÃO SANCIONADOR"
+FROM _ceis WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
+UNION ALL
+SELECT 'SANÇÃO CNEP', 'Categoria / Multa', "CATEGORIA DA SANÇÃO" || ' | R$ ' || COALESCE("VALOR DA MULTA",'0')
+FROM _cnep WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
+UNION ALL
+SELECT 'DESPESAS 2024', 'Total Recebido',
+  CAST(SUM(CAST(REPLACE(REPLACE("Valor Recebido",'.',''),',','.') AS DECIMAL)) AS VARCHAR)
+FROM _despesas_favorecidos
+WHERE "Código Favorecido" = '33000167000101' AND "Ano e mês do lançamento" LIKE '%/2024'
+UNION ALL
+SELECT 'CONVÊNIOS', 'Situação / Objeto',
+  "SITUAÇÃO CONVÊNIO" || ' | ' || LEFT("OBJETO DO CONVÊNIO", 80)
+FROM _convenios WHERE "CÓDIGO CONVENENTE" LIKE '33000167%' LIMIT 1
 
 [CEIS × transferências]
 WITH sancionados AS (SELECT DISTINCT "CPF OU CNPJ DO SANCIONADO" as cnpj FROM _ceis WHERE "TIPO DE PESSOA"='J')
@@ -353,8 +385,7 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"CNPJ OU CPF DO SANCIONADO"/g, '"CPF OU CNPJ DO SANCIONADO"');
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
   s = s.replace(/"RAZÃO SOCIAL"(?! [–\-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
-  s = s.replace(/"Nome_Órgão Superior"/g, '"Nome Órgão Superior"');
-  s = s.replace(/"Nome_Órgão"/g, '"Nome Órgão"');
+  // _pep usa underscore: "Nome_Órgão", "Nome_PEP", "Descrição_Função" — NÃO converter para espaço
   s = s.replace(/(_cadastro__4\b.*?)ORGSUP_LOTACAO(?!_INSTITUIDOR)/gs,
     '$1ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
   s = s.replace(/SUBSTRING\("DATA LANÇAMENTO",\s*1,\s*7\)/g, 'SUBSTRING(CAST("DATA LANÇAMENTO" AS VARCHAR),1,7)');
