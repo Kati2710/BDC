@@ -206,6 +206,7 @@ _acordos(143): "CNPJ DO SANCIONADO","RAZÃO SOCIAL","SITUAÇÃO DO ACORDO DE LEN
 
 -- LICITAÇÕES E COMPRAS --
 _licitacoes(2M): "Número Licitação","Nome UG","Modalidade Compra","Objeto","Situação Licitação","Nome Órgão Superior","Nome Órgão","UF","Data Resultado Compra"(DATE),"Data Abertura"(DATE),"Valor Licitação"
+  ⚠️ _licitacoes NÃO tem coluna de CNPJ/CPF do vencedor — impossível cruzar com sanções por empresa. Para cruzar sancionados com pagamentos use _despesas_favorecidos ou _transferencias.
 _compras(4M): "Código Órgão"(BIGINT),"Nome Órgão","Código UG","Número Contrato","Descrição Item Compra","Quantidade Item"(BIGINT),"Valor Item"
   ⚠️ _compras NÃO tem "Número Licitação" — tem "Número Contrato". Não faça JOIN por licitação.
 _convenios(612K): "NÚMERO CONVÊNIO","UF","NOME MUNICÍPIO","SITUAÇÃO CONVÊNIO"('EM EXECUÇÃO'|'RESCINDIDO'|'BAIXADO'|'CANCELADO'|'EXCLUÍDO'|'PRESTAÇÃO DE CONTAS ENVIADA PARA ANÁLISE'|'PRESTAÇÃO DE CONTAS EM COMPLEMENTAÇÃO'|'PRESTAÇÃO DE CONTAS REJEITADA'),"OBJETO DO CONVÊNIO","NOME ÓRGÃO SUPERIOR","NOME ÓRGÃO CONCEDENTE","CÓDIGO CONVENENTE","TIPO CONVENENTE"('Administração Pública'|'Administração Pública Estadual ou do Distrito Federal'|'Administração Pública Municipal'|'Entidades Sem Fins Lucrativos'|'Entidades Empresariais Privadas'|'Pessoa Física'|'Organizações Internacionais'),"NOME CONVENENTE","VALOR CONVÊNIO","VALOR LIBERADO","DATA INÍCIO VIGÊNCIA"(DATE),"DATA FINAL VIGÊNCIA"(DATE)
@@ -382,7 +383,7 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
       }]
     });
 
-    let sql = sqlGen.content.find(b => b.type === "text")?.text.trim() || "";
+    let sql = sqlGen.content.find(b => b.type === "text")?.text?.trim() || "";
     sql = sql.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
     sql = applySqlAutoFix(sql);
     console.log(`📝 SQL: ${sql.substring(0, 300)}`);
@@ -408,15 +409,52 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
     }
 
     console.log("⚡ Executando...");
-    const response = await fetch(`${HETZNER_API}/query_unified`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
-      body: JSON.stringify({ sql }),
-      signal: AbortSignal.timeout(240000)
-    });
 
-    const data = await response.json();
-    if (!response.ok || data.error) throw new Error(data.error || "Query falhou");
+    // ── RETRY: até 2 tentativas com autocorreção de erro ──
+    let data, sql_final = sql;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const response = await fetch(`${HETZNER_API}/query_unified`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
+        body: JSON.stringify({ sql: sql_final }),
+        signal: AbortSignal.timeout(240000)
+      });
+      data = await response.json();
+
+      if (!response.ok || data.error) {
+        if (attempt === 2) throw new Error(data.error || "Query falhou após 2 tentativas");
+        console.log(`⚠️ Tentativa ${attempt} falhou: ${data.error}`);
+        console.log("🔄 Haiku corrigindo SQL...");
+        const fix = await anthropic.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 2000,
+          messages: [{ role: "user", content:
+`Você gerou este SQL para DuckDB que retornou um erro. Corrija APENAS o problema indicado.
+
+PERGUNTA ORIGINAL: "${query}"
+
+SQL COM ERRO:
+${sql_final}
+
+ERRO RETORNADO:
+${data.error}
+
+REGRAS:
+- Responda APENAS com o SQL corrigido, sem explicações
+- Se a coluna não existe na tabela, remova-a ou substitua pela correta
+- Não invente colunas — use apenas o que foi mencionado no SQL original
+- Mantenha a lógica original da query` }]
+        });
+        sql_final = fix.content.find(b => b.type==="text")?.text?.trim() || sql_final;
+        sql_final = sql_final.replace(/```sql\n?/g,"").replace(/```/g,"").trim();
+        sql_final = applySqlAutoFix(sql_final);
+        console.log(`🔄 SQL corrigido: ${sql_final.substring(0,200)}`);
+      } else {
+        break; // sucesso
+      }
+    }
+
+    sql = sql_final; // atualiza para SQL corrigido se houve retry
     console.log(`📊 ${data.row_count || 0} linhas retornadas`);
 
     // ── CONTEXTO EXTERNO: web search + Semantic Scholar quando necessário ──
