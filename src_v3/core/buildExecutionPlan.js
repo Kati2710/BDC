@@ -14,15 +14,20 @@ export function buildExecutionPlan({ normalizedQuery, intent, entities, domain }
     q.includes("mostrar") ||
     q.includes("mostre");
 
-  const asksSummary =
-    q.includes("resumo") ||
-    q.includes("total") ||
-    q.includes("somatorio") ||
-    q.includes("soma") ||
-    q.includes("quanto recebeu") ||
-    q.includes("recebeu recursos");
+const asksSummary =
+  q.includes("resuma") ||
+  q.includes("resumo") ||
+  q.includes("resumir") ||
+  q.includes("total") ||
+  q.includes("somatorio") ||
+  q.includes("somatório") ||
+  q.includes("soma") ||
+  q.includes("quanto recebeu") ||
+  q.includes("quanto recebeu no total") ||
+  q.includes("valor total") ||
+  q.includes("recebeu recursos");
 
-  const output = asksSummary && !asksDetail ? "summary" : "detail";
+  const output = asksSummary ? "summary" : "detail";
 
   const mentionsSancao =
     q.includes("sancao") ||
