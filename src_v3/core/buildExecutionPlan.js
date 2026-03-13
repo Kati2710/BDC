@@ -1,4 +1,5 @@
 import { resolveJoinPath } from "./resolveJoinPath.js";
+import { selectBestJoinPath } from "./selectBestJoinPath.js";
 
 export function buildExecutionPlan({ normalizedQuery, intent, entities, domain }) {
   const q = String(normalizedQuery || "");
@@ -7,25 +8,18 @@ export function buildExecutionPlan({ normalizedQuery, intent, entities, domain }
   const hasCpf = !!entities?.cpf;
   const hasOrgao = !!entities?.orgao;
 
-  const asksDetail =
-    q.includes("dados completos") ||
-    q.includes("todos os detalhes") ||
-    q.includes("detalhes") ||
-    q.includes("mostrar") ||
-    q.includes("mostre");
-
-const asksSummary =
-  q.includes("resuma") ||
-  q.includes("resumo") ||
-  q.includes("resumir") ||
-  q.includes("total") ||
-  q.includes("somatorio") ||
-  q.includes("somatório") ||
-  q.includes("soma") ||
-  q.includes("quanto recebeu") ||
-  q.includes("quanto recebeu no total") ||
-  q.includes("valor total") ||
-  q.includes("recebeu recursos");
+  const asksSummary =
+    q.includes("resuma") ||
+    q.includes("resumo") ||
+    q.includes("resumir") ||
+    q.includes("total") ||
+    q.includes("somatorio") ||
+    q.includes("somatório") ||
+    q.includes("soma") ||
+    q.includes("quanto recebeu") ||
+    q.includes("quanto recebeu no total") ||
+    q.includes("valor total") ||
+    q.includes("recebeu recursos");
 
   const output = asksSummary ? "summary" : "detail";
 
@@ -62,9 +56,10 @@ const asksSummary =
   if (mentionsRecebimentos) desiredTables.push("_despesas_favorecidos");
   if (mentionsViagens) desiredTables.push("_viagens");
   if (mentionsImoveis) desiredTables.push("_imoveisfuncionais");
+  if (hasOrgao) desiredTables.push("_servidores");
   if (domain === "rfb") desiredTables.push("_rfb_estabelecimentos", "_rfb_empresas");
 
-  const joins = resolveJoinPath({
+  const candidateJoins = resolveJoinPath({
     entities,
     desiredTables
   });
@@ -75,7 +70,11 @@ const asksSummary =
       pattern: "cnpj_sancoes_recebimentos",
       baseTable: "_ceis",
       relatedTables: ["_despesas_favorecidos"],
-      joins,
+      joins: selectBestJoinPath({
+        joins: candidateJoins,
+        baseTable: "_ceis",
+        relatedTables: ["_despesas_favorecidos"]
+      }),
       filters: {
         cnpj: entities.cnpj,
         afterSanction: true
@@ -90,7 +89,11 @@ const asksSummary =
       pattern: "cpf_viagens_imoveis",
       baseTable: "_viagens",
       relatedTables: ["_imoveisfuncionais"],
-      joins,
+      joins: selectBestJoinPath({
+        joins: candidateJoins,
+        baseTable: "_viagens",
+        relatedTables: ["_imoveisfuncionais"]
+      }),
       filters: {
         cpf: entities.cpf
       },
@@ -104,7 +107,11 @@ const asksSummary =
       pattern: "orgao_servidores_imoveis",
       baseTable: "_imoveisfuncionais",
       relatedTables: ["_servidores"],
-      joins,
+      joins: selectBestJoinPath({
+        joins: candidateJoins,
+        baseTable: "_imoveisfuncionais",
+        relatedTables: ["_servidores"]
+      }),
       filters: {
         orgao: entities.orgao
       },
@@ -117,7 +124,7 @@ const asksSummary =
     pattern: "default_single_dataset",
     baseTable: null,
     relatedTables: [],
-    joins,
+    joins: [],
     filters: {},
     output
   };
