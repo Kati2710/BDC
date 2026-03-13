@@ -319,6 +319,8 @@ function applySqlAutoFix(sql) {
   s = s.replace(/"Fim do afastamento"/g, "DATA_FIM_AFASTAMENTO");
   s = s.replace(/"SITUAÇÃO DO ACORDO"(?! DE LENIÊNICA)/g, '"SITUAÇÃO DO ACORDO DE LENIÊNICA"');
   s = s.replace(/"CNPJ OU CPF DO SANCIONADO"/g, '"CPF OU CNPJ DO SANCIONADO"');
+  // Corrige ILIKE(col, 'val') → col ILIKE 'val'
+  s = s.replace(/\bILIKE\(([^,]+),\s*('[^']*')\)/g, '$1 ILIKE $2');
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
   // Corrige referências às antigas tabelas _empresas_UF
   s = s.replace(/_empresas_[a-z]{2}\b/g, (match) => {
