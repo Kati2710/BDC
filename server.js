@@ -24,7 +24,6 @@ try {
   console.warn("⚠️ schema_compact.json não encontrado — schema injection desativado");
 }
 
-// Mapa keyword → tabelas relevantes
 const TABLE_KEYWORDS = {
   "_bolsafamilia_pagamentos":           ["bolsa família","bolsa familia","bolsafamilia"],
   "_bolsafamilia_saques":               ["saque bolsa","bolsa família saque"],
@@ -44,59 +43,44 @@ const TABLE_KEYWORDS = {
   "_acordos":                           ["acordo leniência","acordo leniencia","leniência","leniencia"],
   "_pep":                               ["pep","politicamente exposto","pessoa política"],
   "_despesas_favorecidos":              ["despesa","favorecido","recebeu recurso","valor recebido","recursos federais","pagamento federal"],
-  "_despesasdiarias_despesas_empenho":  ["empenho","nota empenho"],
-  "_despesasdiarias_despesas_pagamento":["pagamento siafi","pagamento empenho"],
   "_convenios":                         ["convênio","convenio","siconv","transferegov"],
   "_licitacoes":                        ["licitação","licitacao","pregão","pregao","dispensa","concorrência"],
   "_compras":                           ["compra","contrato federal","item compra"],
   "_transferencias":                    ["transferência","transferencia","repasse federal","fundo a fundo"],
-  "_viagens_viagem":                    ["viagem","diária","diaria","passagem","deslocamento","missão"],
-  "_viagens_trecho":                    ["trecho","origem destino","meio transporte","voo"],
-  "_viagens_passagem":                  ["passagem aérea","bilhete"],
+  "_viagens":                           ["viagem","diária","diaria","passagem","deslocamento","missão"],
   "_cpgf":                              ["cartão corporativo","cartao corporativo","cpgf","cartão governo"],
   "_cpcc":                              ["cpcc","cartão combustível"],
   "_cpdc":                              ["cpdc","cartão convenio"],
-  "_servidores_cadastro":               ["servidor","servidora","funcionário federal","funcionario federal","cargo federal","lotação","lotacao","vínculo","vinculo","efetivo","comissionado"],
-  "_servidores_remuneracao":            ["remuneração","remuneracao","salário federal","salario federal","contracheque","folha pagamento"],
-  "_servidores_afastamentos":           ["afastamento","licença","licenca","ausência"],
-  "_servidores_honorarios_jetons_":     ["jetom","jeton","honorário","honorario","conselho"],
-  "_servidores_honorariosadvocaticios": ["honorário advocatício","honorario advocaticio"],
+  "_servidores":                        ["servidor","servidora","funcionário federal","funcionario federal","cargo federal","lotação","remuneração federal","salário federal"],
   "_imoveisfuncionais":                 ["imóvel funcional","imovel funcional","residência funcional"],
   "_renunciasfiscais":                  ["renúncia fiscal","renuncia fiscal","benefício fiscal","isenção fiscal"],
-  "_orçamentodadespesa":                ["orçamento","orcamento","dotação","loa","ploa"],
-  "_execuçãodareceita":                 ["receita federal","arrecadação","arrecadacao","execução receita"],
+  "_orcamentodadespesa":                ["orçamento","orcamento","dotação","loa","ploa"],
+  "_execucaodareceita":                 ["receita federal","arrecadação","arrecadacao","execução receita"],
   "_emendasparlamentarespordocumento":  ["emenda parlamentar","emenda","parlamentar"],
-  "_apoiamentoemendasparlamentares":    ["apoiamento emenda","apoiador emenda"],
   "_notasfiscais":                      ["nota fiscal","nfe","chave acesso"],
+  "_rfb_empresas":                      ["empresa","cnpj","razão social","razao social","capital social","porte","mei","microempresa","natureza juridica"],
+  "_rfb_estabelecimentos":              ["estabelecimento","cnae","situacao cadastral","ativa","baixada","inapta","matriz","filial","municipio empresa","uf empresa"],
+  "_rfb_socios":                        ["sócio","socio","quadro societario","representante legal","participação societária"],
+  "_rfb_simples":                       ["simples nacional","simples","optante simples","mei optante"],
 };
 
 function getSchemaBlock(query) {
   const q = query.toLowerCase();
   const matched = new Set();
 
-  // Keyword matching
   for (const [table, keywords] of Object.entries(TABLE_KEYWORDS)) {
     if (keywords.some(k => q.includes(k))) {
       matched.add(table);
     }
   }
 
-  // Empresas RFB: detecta por keywords
+  // RFB: se detectar empresa/cnpj, inclui todas as 4 tabelas RFB
   const empresaKw = ["empresa","cnpj","razão social","razao social","inapt","baix","ativ","estabelecimento","sócio","socio","capital social","cnae","porte","matriz","filial","mei","microempresa"];
   if (empresaKw.some(k => q.includes(k))) {
-    matched.add("_empresas_sp"); // representativa (todas têm mesmo schema)
-  }
-
-  // Servidores: inclui todas as variantes se qualquer match
-  if (matched.has("_servidores_cadastro")) {
-    ["_servidores_cadastro__2","_servidores_cadastro__3","_servidores_cadastro__4",
-     "_servidores_cadastro__5","_servidores_cadastro__6","_servidores_cadastro__7"].forEach(t => matched.add(t));
-  }
-  if (matched.has("_servidores_remuneracao")) {
-    ["_servidores_remuneracao__2","_servidores_remuneracao__3"].forEach(t => matched.add(t));
-  }
-  if (matched.has("_servidores_afastamentos")) {
-    matched.add("_servidores_afastamentos__2");
+    matched.add("_rfb_empresas");
+    matched.add("_rfb_estabelecimentos");
+    matched.add("_rfb_socios");
+    matched.add("_rfb_simples");
   }
 
   if (matched.size === 0 || Object.keys(SCHEMA).length === 0) return "";
@@ -177,7 +161,6 @@ async function s2Search(query, limit = 5) {
   }
 }
 
-/* ─── DETECTA SE QUERY PRECISA DE CONTEXTO EXTERNO ─── */
 function needsExternalContext(query, rowCount, sql) {
   const q = query.toLowerCase();
   const noData = rowCount === 0;
@@ -192,203 +175,135 @@ function needsExternalContext(query, rowCount, sql) {
 }
 
 const DB_CATALOG = `
-BANCO: brazildatacorp.duckdb | 5B linhas | DuckDB
+BANCO: brazildatacorp.duckdb | 7B linhas | 41 tabelas | DuckDB
 
 == REGRAS SQL ==
-- BIGINT: só operadores numéricos. VARCHAR: LIKE/=. STRUCT: ponto (est.uf). Aspas duplas em colunas com espaços/acentos.
-- EMPRESAS em CTE: SEMPRE extraia campos STRUCT com alias — SELECT est.uf as uf, est.situacao_cadastral as situacao, est.data_inicio_atividade as data_inicio, est.cnae_principal as cnae, est.cnae_principal_codigo as cnae_cod, est.cnaes_secundarios_codigos as cnaes_sec — e agrupe pelo alias. NUNCA use est.* fora do SELECT onde o STRUCT foi acessado.
-- DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412. NUNCA divida por 100.
-- VALORES monetários são VARCHAR: SUM(CAST(REPLACE(REPLACE(coluna,'.',''),',','.') AS DECIMAL)) — isso vale para "Valor Licitação", "VALOR TRANSFERIDO", "VALOR LIBERADO", "VALOR CONVÊNIO" e qualquer coluna monetária — NUNCA use DECIMAL(18,3) direto
+- BIGINT: só operadores numéricos. VARCHAR: LIKE/=. Aspas duplas em colunas com espaços/acentos.
+- DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412.
+- VALORES monetários são VARCHAR: SUM(CAST(REPLACE(REPLACE(coluna,'.',''),',','.') AS DECIMAL))
 - LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
-- CTEs: não aplique CAST/REPLACE em colunas já computadas como DECIMAL
-- UNION/UNION ALL: ORDER BY só no final, NUNCA dentro de subquery. Use alias numérico (ORDER BY 1,2) — NUNCA expressão como CAST(MES AS INTEGER)
-- UNION com múltiplas tabelas: todas as subqueries devem ter EXATAMENTE o mesmo número de colunas
-- DUE DILIGENCE / ANÁLISE DE CNPJ: máximo 4 tabelas por UNION, 3 colunas fixas: fonte, campo, valor
+- UNION/UNION ALL: ORDER BY só no final. Use alias numérico (ORDER BY 1,2)
+- WINDOW FUNCTIONS: NUNCA use OVER() em WHERE. Use QUALIFY ou subconsulta
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
 - SERVIDORES: ANO e MES são VARCHAR: WHERE ANO='2024' AND MES='01'
-- AFASTAMENTOS: DATA_INICIO_AFASTAMENTO e DATA_FIM_AFASTAMENTO são VARCHAR com formatos MISTOS ('DD/MM/YYYY' ou 'YYYY-MM-DD'). Use SEMPRE COALESCE dos dois formatos: COALESCE(TRY_STRPTIME(col,'%d/%m/%Y'), TRY_STRPTIME(col,'%Y-%m-%d')) — NUNCA use um único formato pois causará parse error. Para afastamentos em aberto: DATA_FIM_AFASTAMENTO IS NULL OR DATA_FIM_AFASTAMENTO = 'Não informada'. NÃO existe "Início do afastamento" nem "Fim do afastamento"
-- CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". NÃO existe "CNPJ OU CPF DO SANCIONADO". NÃO existe "TIPO SANÇÃO" — use "CATEGORIA DA SANÇÃO"
-- CEIS/CNEP/CEAF: coluna de nome é "NOME DO SANCIONADO" — NÃO existe "RAZÃO SOCIAL" nessas tabelas
-- ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA" — NÃO existe "SITUAÇÃO DO ACORDO". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
-- VALORES monetários com ponto de milhar + vírgula decimal (ex: "10.313.296,80"): use CAST(REPLACE(REPLACE(col, '.', ''), ',', '.') AS DECIMAL) — padrão EXATO com DOIS REPLACE aninhados
-- DATAS VARCHAR em viagens: "Período - Data de início" e "Período - Data de fim" são VARCHAR 'YYYY-MM-DD'. Para ano: SUBSTRING("Período - Data de início",1,4). NUNCA use EXTRACT/date_part em VARCHAR
-- DATAS DATE (não VARCHAR): para extrair ano de coluna DATE use CAST(EXTRACT(YEAR FROM col) AS VARCHAR) ou SUBSTRING(CAST(col AS VARCHAR),1,4) — NUNCA SUBSTRING direto em DATE
-- WINDOW FUNCTIONS: NUNCA use funções de janela (OVER()) em WHERE. Use QUALIFY ou subconsulta
-- SERVIDORES pensionistas (_cadastro__4): coluna de órgão chama ORGSUP_LOTACAO_INSTITUIDOR_PENSAO — NÃO existe ORGSUP_LOTACAO nessa tabela
-- SERVIDORES cadastro (_servidores_cadastro): coluna de órgão chama ORGSUP_LOTACAO e ORGSUP_EXERCICIO
-- CEPIM: JOIN com outras tabelas via CNPJ é impreciso pois "CNPJ ENTIDADE" no CEPIM é apenas o CNPJ base (8 dígitos) sem filial
-- CNAES em array: cnaes_secundarios_codigos é VARCHAR[] — para filtrar use array_contains(est.cnaes_secundarios_codigos, '6201') NUNCA use LIKE em array
-- NÃO existem tabelas empresas_baixadas, empresas_inaptas, empresas_ativas — use _empresas_UF com filtro em est.situacao_cadastral
-- WINDOW FUNCTIONS em CTE: alias computado NÃO pode ser usado em GROUP BY externo — use subconsulta ou repita a expressão
+- AFASTAMENTOS: use COALESCE(TRY_STRPTIME(col,'%d/%m/%Y'), TRY_STRPTIME(col,'%Y-%m-%d'))
+- CEIS/CNEP/CEAF: coluna do documento é "CPF OU CNPJ DO SANCIONADO". Coluna de sanção é "CATEGORIA DA SANÇÃO"
+- ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
+- DATAS VARCHAR em viagens: SUBSTRING("Período - Data de início",1,4) para ano
+- CNAES em array: use array_contains(cnaes_secundarios_codigos, '6201') — NUNCA LIKE em array
 
-== LIMITAÇÕES — RESPONDA EM PORTUGUÊS SEM GERAR SQL SE PERGUNTAR SOBRE ==
-- Judiciário (STF,STJ,TRF,TRT), Legislativo (Câmara,Senado,vereadores): NÃO estão nos dados
-- Servidores estaduais/municipais: NÃO estão nos dados
-- MEI não é identificável: use porte='MICRO EMPRESA' como aproximação
+== EMPRESAS RFB — ARQUITETURA (4 tabelas unificadas, todas as UFs) ==
+_rfb_empresas(66M): cnpj_basico(VARCHAR), razao_social, natureza_juridica_codigo, natureza_juridica, qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social(DOUBLE), porte_codigo, porte('MICRO EMPRESA'|'EMPRESA DE PEQUENO PORTE'|'DEMAIS'), ente_federativo
+_rfb_estabelecimentos(69M): cnpj_basico, cnpj_completo, cnpj_ordem, cnpj_dv, situacao_cadastral('ATIVA'|'BAIXADA'|'INAPTA'|'SUSPENSA'|'NULA'), data_situacao_cadastral, motivo_situacao, motivo_situacao_codigo, nome_fantasia, matriz_filial('MATRIZ'|'FILIAL'), matriz_filial_codigo, cnae_principal_codigo, cnae_principal, cnaes_secundarios_codigos(VARCHAR[]), cnaes_secundarios_descricoes(VARCHAR[]), uf, municipio, municipio_codigo, logradouro, tipo_logradouro, numero, complemento, bairro, cep, ddd_1, telefone_1, ddd_2, telefone_2, correio_eletronico, data_inicio_atividade, situacao_especial, data_situacao_especial, pais, pais_codigo, cidade_exterior
+_rfb_socios(27M): cnpj_basico, nome_socio, cpf_cnpj_socio, identificador_socio, identificador_socio_codigo, qualificacao_socio, qualificacao_socio_codigo, data_entrada_sociedade, pais, pais_codigo, representante_legal, nome_representante, qualificacao_representante_legal, qualificacao_representante_legal_codigo, faixa_etaria, faixa_etaria_codigo
+_rfb_simples(66M): cnpj_basico, opcao_simples, opcao_simples_codigo, data_opcao_simples, data_exclusao_simples, opcao_mei, opcao_mei_codigo, data_opcao_mei, data_exclusao_mei
+⚠️ JOIN empresas × estabelecimentos: ON e.cnpj_basico = est.cnpj_basico
+⚠️ NÃO existem tabelas _empresas_UF — use as 4 tabelas acima
+
+== LIMITAÇÕES ==
+- Judiciário, Legislativo, servidores estaduais/municipais: NÃO estão nos dados
+- MEI: use opcao_mei='SIM' em _rfb_simples
 
 == CPF — REGRAS CRÍTICAS ==
-CPF MASCARADO (formato ***123456** — NÃO PODE ser usado em JOIN):
+CPF MASCARADO (NÃO usar em JOIN):
   _bolsafamilia_pagamentos, _bolsafamilia_saques, _novobolsafamilia, _auxiliobrasil,
   _bpc, _auxilioemergencial, _segurodefeso, _garantiasafra, _pedemeia, _peti, _auxilioreconstrucao
-  ⚠️ NUNCA tente cruzar programas sociais com _pep, _servidores_*, _ceis, _cnep por CPF — impossível
 
-CPF COMPLETO (pode ser usado em JOIN):
-  _pep, _servidores_cadastro (e __2..7), _servidores_remuneracao (e __2..5),
-  _servidores_afastamentos, _servidores_honorarios_jetons_,
-  _cpgf, _cpcc, _cpdc, _viagens_viagem,
-  _ceis (pessoas físicas), _cnep, _ceaf, _imoveisfuncionais
-
-CRUZAMENTOS VÁLIDOS POR CPF:
-  ✅ _pep × _despesas_favorecidos (via "Código Favorecido" = CPF do PEP)
-  ✅ _pep × _viagens_viagem (via "CPF viajante")
-  ✅ _pep × _cpgf (via "CPF PORTADOR")
-  ✅ _servidores_cadastro × _servidores_remuneracao (via Id_SERVIDOR_PORTAL)
-  ✅ _servidores_cadastro × _viagens_viagem (via CPF)
-  ✅ _servidores_cadastro × _cpgf (via CPF = "CPF PORTADOR")
-  ✅ _ceaf × _servidores_cadastro (via CPF — CEAF sanciona servidores)
-  ❌ NUNCA cruze por NOME — nomes têm variações, abreviações e homônimos. Sempre use CPF ou CNPJ.
+CPF COMPLETO (pode usar em JOIN):
+  _pep, _servidores, _cpgf, _cpcc, _cpdc, _viagens, _ceis, _cnep, _ceaf, _imoveisfuncionais
 
 == TABELAS ==
 
 -- PROGRAMAS SOCIAIS --
-Colunas comuns: "MÊS COMPETÊNCIA"(BIGINT),"MÊS REFERÊNCIA"(BIGINT),"UF","CÓDIGO MUNICÍPIO SIAFI","NOME MUNICÍPIO","CPF FAVORECIDO"(VARCHAR),"NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","VALOR PARCELA"(VARCHAR)
-_bolsafamilia_pagamentos(1.4B,até2021): colunas comuns
-_bolsafamilia_saques(478M,até2021): colunas comuns +DATA SAQUE(DATE) — ⚠️ NÃO tem "MÊS COMPETÊNCIA", use "MÊS REFERÊNCIA"
-_novobolsafamilia(668M,2022-2025): colunas comuns
-_auxiliobrasil(280M): colunas comuns
-_bpc(300M): "MÊS COMPETÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS BENEFICIÁRIO"(BIGINT),"CPF BENEFICIÁRIO"(VARCHAR),"NOME BENEFICIÁRIO","NIS REPRESENTANTE LEGAL"(BIGINT),"CPF REPRESENTANTE LEGAL","NOME REPRESENTANTE LEGAL","NÚMERO BENEFÍCIO"(BIGINT),"BENEFÍCIO CONCEDIDO JUDICIALMENTE","VALOR PARCELA"
-_auxilioemergencial(782M): "MÊS DISPONIBILIZAÇÃO"(BIGINT),"UF","CÓDIGO MUNICÍPIO IBGE"(BIGINT),"NOME MUNICÍPIO","NIS BENEFICIÁRIO"(VARCHAR),"CPF BENEFICIÁRIO","NOME BENEFICIÁRIO","NIS RESPONSÁVEL"(BIGINT),"CPF RESPONSÁVEL","NOME RESPONSÁVEL","ENQUADRAMENTO","PARCELA","VALOR BENEFÍCIO"
-_segurodefeso(40M): "MÊS REFERÊNCIA"(BIGINT),"UF","CÓDIGO MUNICÍPIO SIAFI","NOME MUNICÍPIO","CPF FAVORECIDO","NIS FAVORECIDO"(BIGINT),"RGP FAVORECIDO","NOME FAVORECIDO","VALOR PARCELA"
-_garantiasafra(33M): "MÊS REFERÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","VALOR PARCELA" — sem CPF
-_pedemeia(37M): "MÊS FOLHA"(BIGINT),"MÊS REFERÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS BENEFICIÁRIO"(BIGINT),"CPF BENEFICIÁRIO","NOME BENEFICIÁRIO","CÓDIGO ETAPA ENSINO"(BIGINT),"ETAPA ENSINO","TIPO INCENTIVO","DATA DO PAGAMENTO"(DATE),"VALOR PARCELA" — ⚠️ usa "MÊS FOLHA" não "MÊS COMPETÊNCIA"
-_peti(803K): "MÊS REFERÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","SITUAÇÃO BENEFÍCIO","VALOR PARCELA"
-_auxilioreconstrucao(425K): "MÊS REFERÊNCIA"(BIGINT),"UF","CÓDIGO MUNICÍPIO SIAFI"(BIGINT),"NOME MUNICÍPIO","CPF FAVORECIDO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","QUANTIDADE DE PESSOAS NA FAMÍLIA"(BIGINT),"DATA EFETIVAÇÃO PARCELA"(DATE),"VALOR PARCELA"
-
--- EMPRESAS RFB (28 tabelas por UF) --
-_empresas_sp(20M),_mg(7M),_rj(6M),_rs(5M),_pr(5M),_ba(3M),_sc(3M),_go(2M),_pe(2M),_ce(2M),
-_df(1M),_es(1M),_mt(1M),_ma(1M),_pa(1M),_ms(914K),_pb(881K),_rn(787K),_am(740K),_al(653K),
-_pi(593K),_ro(476K),_to(460K),_se(457K),_ex(169K),_ap(151K),_ac(158K),_rr(134K)
-Colunas: cnpj_basico(VARCHAR), razao_social, porte('MICRO EMPRESA'|'EMPRESA DE PEQUENO PORTE'|'DEMAIS'), capital_social(DOUBLE), est(STRUCT)
-est: situacao_cadastral('ATIVA'|'BAIXADA'|'INAPTA'|'SUSPENSA'|'NULA'), uf, municipio, cnpj_completo, cnae_principal, cnae_principal_codigo, cnaes_secundarios_codigos(VARCHAR[]), cnaes_secundarios_descricoes(VARCHAR[]), data_inicio_atividade(VARCHAR YYYYMMDD→LIKE'2024%'), data_situacao_cadastral, nome_fantasia, matriz_filial, motivo_situacao, cep, logradouro, bairro, telefone_1, correio_eletronico
+_bolsafamilia_pagamentos(1.48B,até2021): "MÊS COMPETÊNCIA"(BIGINT),"UF","CPF FAVORECIDO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","VALOR PARCELA"
+_bolsafamilia_saques(1.28B,até2021): mesmas colunas +"DATA SAQUE"(DATE) — usa "MÊS REFERÊNCIA" não "MÊS COMPETÊNCIA"
+_novobolsafamilia(668M,2022-2025): "MÊS COMPETÊNCIA"(BIGINT),"UF","CPF FAVORECIDO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","VALOR PARCELA"
+_auxiliobrasil(294M): mesmas colunas comuns
+_bpc(440M): "MÊS COMPETÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS BENEFICIÁRIO"(BIGINT),"CPF BENEFICIÁRIO","NOME BENEFICIÁRIO","VALOR PARCELA"
+_auxilioemergencial(782M): "MÊS DISPONIBILIZAÇÃO"(BIGINT),"UF","CPF BENEFICIÁRIO","NOME BENEFICIÁRIO","VALOR BENEFÍCIO"
+_segurodefeso(40M): "MÊS REFERÊNCIA"(BIGINT),"UF","CPF FAVORECIDO","NOME FAVORECIDO","VALOR PARCELA"
+_garantiasafra(33M): "MÊS REFERÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","VALOR PARCELA"
+_pedemeia(37M): "MÊS FOLHA"(BIGINT),"UF","CPF BENEFICIÁRIO","NOME BENEFICIÁRIO","ETAPA ENSINO","VALOR PARCELA"
+_peti(803K): "MÊS REFERÊNCIA"(BIGINT),"UF","NOME MUNICÍPIO","NIS FAVORECIDO"(BIGINT),"NOME FAVORECIDO","VALOR PARCELA"
+_auxilioreconstrucao(425K): "MÊS REFERÊNCIA"(BIGINT),"UF","CPF FAVORECIDO","NOME FAVORECIDO","VALOR PARCELA"
 
 -- SERVIDORES --
-Schema cadastro: Id_SERVIDOR_PORTAL,NOME,CPF,MATRICULA,DESCRICAO_CARGO,FUNCAO,UORG_LOTACAO,ORG_LOTACAO,ORGSUP_LOTACAO,ORG_EXERCICIO,ORGSUP_EXERCICIO,TIPO_VINCULO,SITUACAO_VINCULO,REGIME_JURIDICO,JORNADA_DE_TRABALHO,DATA_INGRESSO_ORGAO,UF_EXERCICIO
-_servidores_cadastro(19M): SITUACAO_VINCULO='ATIVO PERMANENTE'|'SEM VINCULO'|'CONTRATO TEMPORARIO'|'NOMEADO CARGO COMIS.'
-_servidores_cadastro__2(593K): SITUACAO_VINCULO='ATIVO PERMANENTE'|'MILITAR DA ATIVA'|'CELETISTA'
-_servidores_cadastro__3(793K): SITUACAO_VINCULO='ATIVO PERMANENTE'|'CONT.PROF.SUBSTITUTO'
-_servidores_cadastro__4(73K—pensionistas): CPF_REPRESENTANTE_LEGAL,CPF_INSTITUIDOR_PENSAO,TIPO_PENSAO,DATA_INICIO_PENSAO — ORGSUP_LOTACAO_INSTITUIDOR_PENSAO
-_servidores_cadastro__5(12M—militares reforma): TIPO_APOSENTADORIA,DATA_APOSENTADORIA
-_servidores_cadastro__6(1M): SITUACAO_VINCULO='EXCEDENTE A LOTACAO'|'SEM VINCULO'
-_servidores_cadastro__7(52M—militares ativos): SITUACAO_VINCULO='CEDIDO SUS/LEI 8270'|'CELETISTA/EMPREGADO'|'EMPREGO PUBLICO'
-⚠️ NUNCA use SITUACAO_VINCULO='ATIVO'. Civis ativos→__1 ou __2 com 'ATIVO PERMANENTE'. Militares ativos→__7.
-
-_servidores_remuneracao(19M)+__2(30M)+__3(52M)+__4(237K)+__5(9M):
-  ANO(VARCHAR),MES(VARCHAR),Id_SERVIDOR_PORTAL,CPF,NOME,"REMUNERAÇÃO BÁSICA BRUTA (R$)","ABATE-TETO (R$)","GRATIFICAÇÃO NATALINA (R$)","FÉRIAS (R$)","IRRF (R$)","PSS/RPGS (R$)","DEMAIS DEDUÇÕES (R$)","REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)","TOTAL DE VERBAS INDENIZATÓRIAS (R$)(*)"
-  ⚠️ SEM coluna de órgão — JOIN com _servidores_cadastro via Id_SERVIDOR_PORTAL
-  ⚠️ COBERTURA TOTAL: para rankings de remuneração use UNION ALL de TODAS as 5 tabelas:
-  SELECT * FROM _servidores_remuneracao WHERE ANO='2024' AND MES='12'
-  UNION ALL SELECT * FROM _servidores_remuneracao__2 WHERE ANO='2024' AND MES='12'
-  UNION ALL SELECT * FROM _servidores_remuneracao__3 WHERE ANO='2024' AND MES='12'
-  UNION ALL SELECT * FROM _servidores_remuneracao__4 WHERE ANO='2024' AND MES='12'
-  UNION ALL SELECT * FROM _servidores_remuneracao__5 WHERE ANO='2024' AND MES='12'
-  — NÃO consulte só _servidores_remuneracao pois cobre apenas civis sem vínculo especial
-
-_servidores_afastamentos(84K)+__2(8M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO(VARCHAR),DATA_FIM_AFASTAMENTO(VARCHAR)
-_servidores_honorarios_jetons_(45K): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,EMPRESA,VALOR
-_servidores_honorariosadvocaticios(1M): ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,OBSERVACOES,VALOR
-_servidores_observacoes(463K+__2..7): ANO,MES,Id_SERVIDOR_PORTAL,NOME,CPF,OBSERVACAO
+_servidores(424M total — cadastro+remuneração+afastamentos+jetons):
+  cadastro: Id_SERVIDOR_PORTAL,NOME,CPF,MATRICULA,DESCRICAO_CARGO,ORGSUP_LOTACAO,ORG_LOTACAO,TIPO_VINCULO,SITUACAO_VINCULO,UF_EXERCICIO
+  remuneração: ANO(VARCHAR),MES(VARCHAR),Id_SERVIDOR_PORTAL,CPF,NOME,"REMUNERAÇÃO BÁSICA BRUTA (R$)","REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)"
+  afastamentos: ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO(VARCHAR),DATA_FIM_AFASTAMENTO(VARCHAR)
+  ⚠️ SITUACAO_VINCULO: civis='ATIVO PERMANENTE', militares='MILITAR DA ATIVA'
+  ⚠️ Para remuneração completa use tabelas: _servidores + _servidores__2 + _servidores__3 + _servidores__4 + _servidores__5
 
 -- DESPESAS --
-_despesas_favorecidos(114M): "Código Favorecido","Nome Favorecido","Sigla UF","Nome Município","Código Órgão Superior","Nome Órgão Superior","Código Órgão","Nome Órgão","Ano e mês do lançamento"(VARCHAR'MM/YYYY'→LIKE'%/2024'),"Valor Recebido"(VARCHAR)
-_despesasdiarias_despesas_empenho(31M): "Id Empenho"(BIGINT),"Código Empenho","Data Emissão"(DATE),"Tipo Empenho","Código Órgão Superior"(BIGINT),"Órgão Superior","Favorecido","Código Favorecido","Função","Programa","Ação","Categoria de Despesa","Grupo de Despesa","Valor Original do Empenho","Valor do Empenho Convertido pra R$"
-_despesasdiarias_despesas_pagamento(103M): "Código Pagamento","Data Emissão","Código Órgão Superior","Órgão Superior","Órgão","Código Favorecido","Favorecido","Valor Original do Pagamento","Valor do Pagamento Convertido pra R$"
-_despesasdiarias_despesas_pagamento_favorecidosfinais(131M): "Código Pagamento","Data Emissão","Código Favorecido","Favorecido","Valor do Pagamento em R$"
-_despesasdiarias_despesas_liquidacao_empenhosimpactados(77M): "Código Liquidação","Código Empenho","Valor Liquidado (R$)","Valor Restos a Pagar Pagos (R$)"
-_despesasdiarias_despesas_pagamento_empenhosimpactados(103M): "Código Pagamento","Código Empenho","Valor Pago (R$)"
-_despesasdiarias_despesas_itemempenho(33M): "Id Empenho"(BIGINT),"Código Empenho","Descrição","Quantidade","Valor Unitário","Valor Total"
+_despesas_favorecidos(114M): "Código Favorecido","Nome Favorecido","Sigla UF","Nome Órgão Superior","Ano e mês do lançamento"(VARCHAR'MM/YYYY'),"Valor Recebido"(VARCHAR)
+_despesasdiarias(594M): colunas variam por ano (107-112) — principais: "Código Empenho","Data Emissão","Órgão Superior","Favorecido","Código Favorecido","Valor do Pagamento Convertido pra R$"
 
 -- VIAGENS --
-_viagens_viagem(9M): "Identificador do processo de viagem","Código do órgão superior","Nome do órgão superior","Nome órgão solicitante","CPF viajante","Nome","Cargo","Período - Data de início","Período - Data de fim","Destinos","Motivo","Valor diárias","Valor passagens"
-_viagens_trecho(20M): "Identificador do processo de viagem","Origem - País","Origem - UF","Origem - Cidade","Destino - País","Destino - UF","Destino - Cidade","Meio de transporte","Número Diárias","Missao?"
-_viagens_passagem(5M): "Identificador do processo de viagem","Meio de transporte","País - Destino ida","UF - Destino ida","Cidade - Destino ida","Valor da passagem","Data da emissão/compra"
-_viagens_pagamento(16M): "Identificador do processo de viagem","Nome do órgão superior","Tipo de pagamento","Valor"
+_viagens(50M): "Identificador do processo de viagem","CPF viajante","Nome","Cargo","Período - Data de início","Período - Data de fim","Destinos","Valor diárias","Valor passagens"
 
 -- SANÇÕES --
-_ceis(22K): "TIPO DE PESSOA"(VARCHAR'F'/'J'),"CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE),"DATA FINAL SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR","UF ÓRGÃO SANCIONADOR"
-_cnep(2K): mesmo schema + "VALOR DA MULTA"
-_ceaf(4K): "TIPO DE PESSOA"(BOOLEAN),"CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR"
-_cepim(4K): "CNPJ ENTIDADE","NOME ENTIDADE","NÚMERO CONVÊNIO","ÓRGÃO CONCEDENTE","MOTIVO DO IMPEDIMENTO"
-_acordos(143): "CNPJ DO SANCIONADO","RAZÃO SOCIAL – CADASTRO RECEITA","SITUAÇÃO DO ACORDO DE LENIÊNICA","DATA DE INÍCIO DO ACORDO"(DATE),"DATA DE FIM DO ACORDO"(DATE),"ÓRGÃO SANCIONADOR"
+_ceis(22K): "TIPO DE PESSOA","CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE),"DATA FINAL SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR"
+_cnep(2K): mesmo schema +"VALOR DA MULTA"
+_ceaf(4K): "CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE)
+_cepim(4K): "CNPJ ENTIDADE","NOME ENTIDADE","MOTIVO DO IMPEDIMENTO"
+_acordos(298): "CNPJ DO SANCIONADO","RAZÃO SOCIAL – CADASTRO RECEITA","SITUAÇÃO DO ACORDO DE LENIÊNICA","DATA DE INÍCIO DO ACORDO"(DATE)
 
 -- LICITAÇÕES E COMPRAS --
-_licitacoes(2M): "Número Licitação","Nome UG","Modalidade Compra","Objeto","Situação Licitação","Nome Órgão Superior","Nome Órgão","UF","Data Resultado Compra"(DATE),"Data Abertura"(DATE),"Valor Licitação"
-  ⚠️ NÃO tem coluna de CNPJ/CPF do vencedor
-_compras(4M): "Código Órgão"(BIGINT),"Nome Órgão","Código UG","Número Contrato","Descrição Item Compra","Quantidade Item"(BIGINT),"Valor Item"
-_convenios(612K): "NÚMERO CONVÊNIO","UF","NOME MUNICÍPIO","SITUAÇÃO CONVÊNIO","OBJETO DO CONVÊNIO","NOME ÓRGÃO SUPERIOR","NOME ÓRGÃO CONCEDENTE","CÓDIGO CONVENENTE","TIPO CONVENENTE","NOME CONVENENTE","VALOR CONVÊNIO","VALOR LIBERADO","DATA INÍCIO VIGÊNCIA"(DATE),"DATA FINAL VIGÊNCIA"(DATE)
+_licitacoes(99M): "Número Licitação","Modalidade Compra","Objeto","Nome Órgão Superior","UF","Data Resultado Compra"(DATE),"Valor Licitação"
+_compras(6M): "Código Órgão"(BIGINT),"Nome Órgão","Descrição Item Compra","Quantidade Item"(BIGINT),"Valor Item"
+_convenios(1.8M): "NÚMERO CONVÊNIO","UF","SITUAÇÃO CONVÊNIO","OBJETO DO CONVÊNIO","NOME ÓRGÃO CONCEDENTE","NOME CONVENENTE","VALOR CONVÊNIO","VALOR LIBERADO","DATA INÍCIO VIGÊNCIA"(DATE)
 
 -- CARTÃO CORPORATIVO --
-_cpgf(2M): "CÓDIGO ÓRGÃO SUPERIOR"(BIGINT),"NOME ÓRGÃO SUPERIOR","CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","ANO EXTRATO"(BIGINT),"MÊS EXTRATO"(VARCHAR),"CPF PORTADOR"(VARCHAR),"NOME PORTADOR","NOME FAVORECIDO","TRANSAÇÃO","DATA TRANSAÇÃO"(DATE),"VALOR TRANSAÇÃO","CNPJ OU CPF FAVORECIDO"(VARCHAR)
-_cpcc(1M): +"TIPO AQUISIÇÃO","CNPJ OU CPF FAVORECIDO"(BIGINT)
-_cpdc(129K): +"CPF PORTADOR","NOME PORTADOR","CNPJ OU CPF FAVORECIDO","NÚMERO CONVÊNIO"(BIGINT),"NOME CONVENENTE"
+_cpgf(1.8M): "NOME ÓRGÃO SUPERIOR","ANO EXTRATO"(BIGINT),"MÊS EXTRATO","CPF PORTADOR","NOME PORTADOR","NOME FAVORECIDO","VALOR TRANSAÇÃO","DATA TRANSAÇÃO"(DATE)
+_cpcc(1.3M): similar + "TIPO AQUISIÇÃO"
+_cpdc(129K): similar + "NÚMERO CONVÊNIO"(BIGINT)
 
 -- OUTROS --
-_pep(71K): CPF,"Nome_PEP","Descrição_Função","Nome_Órgão","Data_Início_Exercício"(DATE),"Data_Fim_Exercício"(VARCHAR—pode ser NULL ou string vazia),"Data_Fim_Carência"(VARCHAR)
-  ⚠️ _pep: "Data_Fim_Exercício" e "Data_Fim_Carência" são VARCHAR — NUNCA compare com DATE diretamente. Para filtrar ativos em 2024: WHERE "Data_Início_Exercício" <= '2024-12-31' AND ("Data_Fim_Exercício" IS NULL OR "Data_Fim_Exercício" = '' OR "Data_Fim_Exercício" >= '2024-01-01')
-_imoveisfuncionais(23K): "NOME PERMISSIONÁRIO",CPF,"ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO","DATA INÍCIO OCUPAÇÃO"(DATE)
-_orçamentodadespesa(305K): "EXERCÍCIO"(BIGINT),"NOME ÓRGÃO SUPERIOR","NOME FUNÇÃO","NOME PROGRAMA ORÇAMENTÁRIO","NOME AÇÃO","ORÇAMENTO INICIAL (R$)","ORÇAMENTO EMPENHADO (R$)","ORÇAMENTO REALIZADO (R$)"
-_execuçãodareceita(2M): "CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","CATEGORIA ECONÔMICA","ORIGEM RECEITA","VALOR PREVISTO ATUALIZADO","VALOR REALIZADO","DATA LANÇAMENTO"(DATE),"ANO EXERCÍCIO"(BIGINT)
-_transferencias(9M): "ANO / MÊS"(BIGINT YYYYMM),"TIPO TRANSFERÊNCIA","UF","NOME MUNICÍPIO","NOME ÓRGÃO","CÓDIGO FAVORECIDO","NOME FAVORECIDO","VALOR TRANSFERIDO"
-_emendasparlamentarespordocumento(4M): "Código da Emenda","Ano da Emenda"(BIGINT),"Nome do Autor da Emenda","Valor Empenhado","Valor Pago","Tipo de Emenda","UF de aplicação do recurso","Favorecido"
-_renúnciasfiscais(752K): "Ano-calendário"(BIGINT),CNPJ,"Razão Social","Código CNAE",UF,"Tipo Renúncia","Benefício Fiscal","Tributo","Valor Renúncia Fiscal (R$)"
-_apoiamentoemendasparlamentares(34K): "Código Apoiador"(BIGINT),"Apoiador","Nome do Autor da Emenda","Valor Empenhado","Valor Pago","Órgão Superior"
-_notasfiscais(274K): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENTO","DESCRIÇÃO EVENTO"
+_pep(71K): CPF,"Nome_PEP","Descrição_Função","Nome_Órgão","Data_Início_Exercício"(DATE),"Data_Fim_Exercício"(VARCHAR)
+_imoveisfuncionais(51K): "NOME PERMISSIONÁRIO",CPF,"ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO","DATA INÍCIO OCUPAÇÃO"(DATE)
+_transferencias(9.5M): "ANO / MÊS"(BIGINT YYYYMM),"TIPO TRANSFERÊNCIA","UF","NOME FAVORECIDO","VALOR TRANSFERIDO"
+_emendasparlamentarespordocumento(4.4M): "Ano da Emenda"(BIGINT),"Nome do Autor da Emenda","Valor Empenhado","Valor Pago","UF de aplicação do recurso","Favorecido"
+_renunciasfiscais(3.3M): "Ano-calendário"(BIGINT),CNPJ,"Razão Social","Código CNAE",UF,"Tipo Renúncia","Valor Renúncia Fiscal (R$)"
+_notasfiscais(33M): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENTO","DESCRIÇÃO EVENTO"
+_orcamentodadespesa(332K): "EXERCÍCIO"(BIGINT),"NOME ÓRGÃO SUPERIOR","NOME AÇÃO","ORÇAMENTO INICIAL (R$)","ORÇAMENTO REALIZADO (R$)"
+_execucaodareceita(1.7M): "CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","VALOR PREVISTO ATUALIZADO","VALOR REALIZADO","DATA LANÇAMENTO"(DATE)
 
 == CRUZAMENTOS PRINCIPAIS ==
 
 [CNPJ: due diligence]
--- REGRA: busca cadastro em TODAS as UFs via UNION ALL antes do LIMIT 1 — empresa pode estar em qualquer estado
--- REGRA: máximo 5 blocos no UNION para manter performance — NÃO adicione mais tabelas
-WITH cadastro AS (
-  SELECT est.situacao_cadastral as sit, razao_social, est.uf, est.municipio, est.cnae_principal
-  FROM _empresas_sp WHERE est.cnpj_completo = '33000167000101'
-  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_rj WHERE est.cnpj_completo = '33000167000101'
-  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_mg WHERE est.cnpj_completo = '33000167000101'
-  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_rs WHERE est.cnpj_completo = '33000167000101'
-  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_pr WHERE est.cnpj_completo = '33000167000101'
-  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_ba WHERE est.cnpj_completo = '33000167000101'
-  UNION ALL SELECT est.situacao_cadastral, razao_social, est.uf, est.municipio, est.cnae_principal FROM _empresas_df WHERE est.cnpj_completo = '33000167000101'
+WITH emp AS (
+  SELECT e.cnpj_basico, e.razao_social, e.porte, e.capital_social,
+         est.situacao_cadastral, est.uf, est.municipio, est.cnae_principal,
+         est.data_inicio_atividade
+  FROM _rfb_empresas e
+  JOIN _rfb_estabelecimentos est ON est.cnpj_basico = e.cnpj_basico
+  WHERE est.cnpj_completo = '33000167000101'
   LIMIT 1
 )
 SELECT 'CADASTRO RFB' as secao, 'Razão Social / Situação / UF' as campo,
-  COALESCE(razao_social,'NÃO ENCONTRADO') || ' | ' || COALESCE(CAST(sit AS VARCHAR),'?') || ' | ' || COALESCE(uf,'?') as valor
-FROM cadastro
+  razao_social || ' | ' || situacao_cadastral || ' | ' || uf as valor FROM emp
 UNION ALL
-SELECT 'SANÇÃO CEIS', 'Categoria / Órgão', "CATEGORIA DA SANÇÃO" || ' | ' || "ÓRGÃO SANCIONADOR"
+SELECT 'SANÇÃO CEIS', 'Categoria', "CATEGORIA DA SANÇÃO"
 FROM _ceis WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
-UNION ALL
-SELECT 'SANÇÃO CNEP', 'Categoria / Multa', "CATEGORIA DA SANÇÃO" || ' | R$ ' || COALESCE("VALOR DA MULTA",'0')
-FROM _cnep WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
 UNION ALL
 SELECT 'DESPESAS 2024', 'Total Recebido',
   CAST(SUM(CAST(REPLACE(REPLACE("Valor Recebido",'.',''),',','.') AS DECIMAL)) AS VARCHAR)
 FROM _despesas_favorecidos
 WHERE "Código Favorecido" = '33000167000101' AND "Ano e mês do lançamento" LIKE '%/2024'
-UNION ALL
-SELECT 'CONVÊNIOS', 'Situação / Objeto',
-  "SITUAÇÃO CONVÊNIO" || ' | ' || LEFT("OBJETO DO CONVÊNIO", 80)
-FROM _convenios WHERE "CÓDIGO CONVENENTE" LIKE '33000167%' LIMIT 1
-
-[CEIS × transferências]
-WITH sancionados AS (SELECT DISTINCT "CPF OU CNPJ DO SANCIONADO" as cnpj FROM _ceis WHERE "TIPO DE PESSOA"='J')
-SELECT s.cnpj, SUM(CAST(REPLACE(d."Valor Recebido",',','.') AS DECIMAL)) as total_recebido
-FROM sancionados s JOIN _despesas_favorecidos d ON d."Código Favorecido" = s.cnpj
-WHERE d."Ano e mês do lançamento" LIKE '%/2024'
-GROUP BY s.cnpj ORDER BY total_recebido DESC
 
 [Servidor + remuneração]
 SELECT c.NOME, c.ORGSUP_EXERCICIO, r."REMUNERAÇÃO BÁSICA BRUTA (R$)"
-FROM _servidores_cadastro c JOIN _servidores_remuneracao r ON r.Id_SERVIDOR_PORTAL = c.Id_SERVIDOR_PORTAL
-WHERE r.ANO='2024' AND r.MES='12' ORDER BY CAST(REPLACE(r."REMUNERAÇÃO BÁSICA BRUTA (R$)",',','.') AS DECIMAL) DESC LIMIT 100
+FROM _servidores c JOIN _servidores__2 r ON r.Id_SERVIDOR_PORTAL = c.Id_SERVIDOR_PORTAL
+WHERE r.ANO='2024' AND r.MES='12'
+ORDER BY CAST(REPLACE(r."REMUNERAÇÃO BÁSICA BRUTA (R$)",',','.') AS DECIMAL) DESC LIMIT 100
+
+[CEIS × despesas]
+WITH sancionados AS (SELECT DISTINCT "CPF OU CNPJ DO SANCIONADO" as cnpj FROM _ceis WHERE "TIPO DE PESSOA"='J')
+SELECT s.cnpj, SUM(CAST(REPLACE(REPLACE(d."Valor Recebido",'.',''),',','.') AS DECIMAL)) as total
+FROM sancionados s JOIN _despesas_favorecidos d ON d."Código Favorecido" = s.cnpj
+WHERE d."Ano e mês do lançamento" LIKE '%/2024'
+GROUP BY s.cnpj ORDER BY total DESC LIMIT 20
 `;
 
 /* ========================= SQL AUTO-FIX ========================= */
@@ -399,16 +314,16 @@ function applySqlAutoFix(sql) {
     `COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))`);
   s = s.replace(/TRY_STRPTIME\(([^,]+),\s*'%Y-%m-%d'\)/g,
     `COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))`);
-
   s = s.replace(/"Início do afastamento"/g, "DATA_INICIO_AFASTAMENTO");
   s = s.replace(/"Fim do afastamento"/g, "DATA_FIM_AFASTAMENTO");
   s = s.replace(/"SITUAÇÃO DO ACORDO"(?! DE LENIÊNICA)/g, '"SITUAÇÃO DO ACORDO DE LENIÊNICA"');
   s = s.replace(/"CNPJ OU CPF DO SANCIONADO"/g, '"CPF OU CNPJ DO SANCIONADO"');
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
-  s = s.replace(/"RAZÃO SOCIAL"(?! [–\-])/g, '"RAZÃO SOCIAL – CADASTRO RECEITA"');
-  // _pep usa underscore: "Nome_Órgão", "Nome_PEP", "Descrição_Função" — NÃO converter para espaço
-  s = s.replace(/(_cadastro__4\b.*?)ORGSUP_LOTACAO(?!_INSTITUIDOR)/gs,
-    '$1ORGSUP_LOTACAO_INSTITUIDOR_PENSAO');
+  // Corrige referências às antigas tabelas _empresas_UF
+  s = s.replace(/_empresas_[a-z]{2}\b/g, (match) => {
+    const uf = match.replace('_empresas_', '').toUpperCase();
+    return `_rfb_estabelecimentos WHERE uf='${uf}'`;
+  });
   s = s.replace(/SUBSTRING\("DATA LANÇAMENTO",\s*1,\s*7\)/g, 'SUBSTRING(CAST("DATA LANÇAMENTO" AS VARCHAR),1,7)');
   s = s.replace(/SUBSTRING\(("Data Emissão"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
 
@@ -416,7 +331,6 @@ function applySqlAutoFix(sql) {
     '"Valor diárias"', '"Valor passagens"', '"Valor Licitação"',
     '"VALOR TRANSFERIDO"', '"VALOR LIBERADO"', '"VALOR CONVÊNIO"',
     '"Valor Renúncia Fiscal (R$)"', '"ORÇAMENTO REALIZADO (R$)"',
-    '"ORÇAMENTO ATUALIZADO (R$)"'
   ];
   for (const col of monetaryCols) {
     const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -441,7 +355,6 @@ app.post("/chat", async (req, res) => {
   try {
     console.log(`\n${"=".repeat(60)}\n❓ "${query}"\n${"=".repeat(60)}`);
 
-    // Schema dinâmico: injeta apenas colunas das tabelas relevantes
     const schemaBlock = getSchemaBlock(query);
     if (schemaBlock) {
       const tables = (schemaBlock.match(/^_\w+:/gm) || []).map(t => t.replace(':',''));
@@ -462,8 +375,7 @@ ${DB_CATALOG}${schemaBlock}
 PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
-REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.
-AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _audit_data_publicacao, _audit_arquivo_origem de pelo menos uma das tabelas principais consultadas.`
+REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`
       }]
     });
 
@@ -481,7 +393,7 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
         if (web?.results?.length) {
           const webCtx = web.results.map((r,i) => `[${i+1}] ${r.title}\nURL: ${r.url}\n${r.content||""}`).join("\n\n");
           const fallback = await anthropic.messages.create({
-            model: "claude-sonnet-4-5-20250929",
+            model: "claude-sonnet-4-20250514",
             max_tokens: 1500,
             messages: [{ role: "user", content: `Pergunta: "${query}"\n\nOs dados não estão na base BDC. Use o contexto web abaixo para responder. Cite as fontes [1],[2] etc e inclua seção ## Fontes.\n\n${webCtx}` }]
           });
@@ -493,7 +405,6 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
 
     console.log("⚡ Executando...");
 
-    // ── RETRY: até 2 tentativas com autocorreção ──
     let data, sql_final = sql;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const response = await fetch(`${HETZNER_API}/query_unified`, {
@@ -512,21 +423,17 @@ AUDITORIA: Quando possível, inclua no SELECT as colunas _audit_url_origem, _aud
           model: "claude-haiku-4-5-20251001",
           max_tokens: 2000,
           messages: [{ role: "user", content:
-`Você gerou este SQL para DuckDB que retornou um erro. Corrija APENAS o problema indicado.
+`Corrija este SQL DuckDB.
 
-PERGUNTA ORIGINAL: "${query}"
+PERGUNTA: "${query}"
 ${schemaBlock}
 SQL COM ERRO:
 ${sql_final}
 
-ERRO RETORNADO:
+ERRO:
 ${data.error}
 
-REGRAS:
-- Responda APENAS com o SQL corrigido, sem explicações
-- Se a coluna não existe, use somente colunas listadas no SCHEMA EXATO acima
-- Não invente colunas — use apenas o que foi mencionado no SQL original
-- Mantenha a lógica original da query` }]
+Responda APENAS com SQL corrigido, sem explicações.` }]
         });
         sql_final = fix.content.find(b => b.type==="text")?.text?.trim() || sql_final;
         sql_final = sql_final.replace(/```sql\n?/g,"").replace(/```/g,"").trim();
@@ -540,59 +447,46 @@ REGRAS:
     sql = sql_final;
     console.log(`📊 ${data.row_count || 0} linhas retornadas`);
 
-    // ── CONTEXTO EXTERNO ──
     const { needsWeb, needsS2 } = needsExternalContext(query, data.row_count || 0, sql);
     let webContext = null, s2Context = null;
 
     if (needsWeb && TAVILY_KEY) {
-      console.log("🌐 Tavily buscando contexto web...");
       webContext = await tavilySearch(query);
-      if (webContext) console.log(`🌐 Tavily: ${webContext.results.length} resultados`);
     }
     if (needsS2) {
-      console.log("📚 Semantic Scholar buscando literatura...");
       s2Context = await s2Search(query);
-      if (s2Context) console.log(`📚 S2: ${s2Context.length} artigos`);
     }
 
     const webSection = webContext ? `\nCONTEXTO WEB:\n${webContext.answer ? `Resumo: ${webContext.answer}\n` : ""}${webContext.results.map((r,i) => `[W${i+1}] ${r.title}\n     URL: ${r.url}\n     ${r.content || ""}`).join("\n")}` : "";
-    const s2Section = s2Context?.length ? `\nLITERATURA ACADÊMICA:\n${s2Context.map((p,i) => `[A${i+1}] ${p.title} (${p.year}) — ${p.authors}\n     ${p.abstract || ""}\n     URL: ${p.url}`).join("\n\n")}` : "";
+    const s2Section = s2Context?.length ? `\nLITERATURA ACADÊMICA:\n${s2Context.map((p,i) => `[A${i+1}] ${p.title} (${p.year})\n     ${p.abstract || ""}`).join("\n\n")}` : "";
 
     console.log("💬 Claude explicando...");
     const explanation = await anthropic.messages.create({
-      model: "claude-sonnet-4-5-20250929",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 2500,
       messages: [{
         role: "user",
-        content: `Você é um analista de dados públicos brasileiros. Responda integrando TODAS as fontes disponíveis.
+        content: `Você é um analista de dados públicos brasileiros.
 
 PERGUNTA: "${query}"
 
 SQL EXECUTADO:
 ${sql}
 
-RESULTADOS DO BANCO BDC (${data.row_count} linhas):
+RESULTADOS (${data.row_count} linhas):
 ${JSON.stringify(data.rows?.slice(0, 50), null, 2)}${webSection}${s2Section}
-
-REGRAS:
-1. Cite cada fonte UMA VEZ com [N] na primeira vez que a usa.
-2. Ao final, seção "## Fontes" com cada citação numerada.
-3. Colunas _audit_* nos resultados: USE-AS para construir citações exatas.
-4. Se 0 linhas mas há contexto web, responda com base no contexto web.
 
 MAPEAMENTO TABELAS → INSTITUIÇÕES:
 - _ceis, _cnep, _ceaf, _cepim, _acordos → CGU – Portal da Transparência
-- _pep → CGU – Pessoas Politicamente Expostas
+- _rfb_* → RFB – Receita Federal (CNPJ)
 - _bolsafamilia*, _novobolsafamilia, _bpc, _auxilioemergencial → MDS
 - _servidores_* → SEGES/MGI
 - _viagens_*, _cpgf* → CGU – Portal da Transparência
-- _despesas_*, _despesasdiarias_* → SOF/STN – SIAFI
+- _despesas_*, _despesasdiarias* → SOF/STN – SIAFI
 - _convenios* → CGU – SICONV/Transferegov
 - _licitacoes*, _compras* → SEGES – Portal de Compras
-- _empresas_* → RFB – Receita Federal (CNPJ)
-- _renuncias* → SOF – Secretaria de Orçamento Federal
 
-Formate valores em R$. Seja preciso e objetivo.`
+Formate valores em R$. Seja preciso e objetivo. Cite fontes com [N].`
       }]
     });
 
@@ -678,7 +572,7 @@ app.get("/health", async (_, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("═".repeat(60));
-  console.log("🚀 BDC — MOTHERDUCK NO HETZNER");
-  console.log(`📡 Porta: ${PORT} | 🗄️ 5B linhas | 475 tabelas`);
+  console.log("🚀 BDC — BRAZILDATACORP");
+  console.log(`📡 Porta: ${PORT} | 🗄️ 7B linhas | 41 tabelas`);
   console.log("═".repeat(60));
 });
