@@ -326,6 +326,10 @@ function applySqlAutoFix(sql) {
   });
   s = s.replace(/SUBSTRING\("DATA LANÇAMENTO",\s*1,\s*7\)/g, 'SUBSTRING(CAST("DATA LANÇAMENTO" AS VARCHAR),1,7)');
   s = s.replace(/SUBSTRING\(("Data Emissão"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
+  s = s.replace(/SUBSTRING\(("Período - Data de início"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
+  s = s.replace(/SUBSTRING\(("Período - Data de fim"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
+  s = s.replace(/SUBSTRING\(("DATA SAQUE"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
+  s = s.replace(/SUBSTRING\(("Data_Início_Exercício"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
 
   const monetaryCols = [
     '"Valor diárias"', '"Valor passagens"', '"Valor Licitação"',
