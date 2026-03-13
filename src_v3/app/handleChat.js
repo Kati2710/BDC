@@ -9,6 +9,7 @@ import { formatAnswer } from "../core/formatAnswer.js";
 import { detectCrossDatasetIntent } from "../core/detectCrossDatasetIntent.js";
 import { buildCrossDatasetSql } from "../core/buildCrossDatasetSql.js";
 import { formatAuditedAnswer } from "../core/formatAuditedAnswer.js";
+import { buildExecutionPlan } from "../core/buildExecutionPlan.js";
 
 export async function handleChat(query) {
   const { normalized } = normalizeQuery(query);
@@ -17,13 +18,23 @@ export async function handleChat(query) {
   const entities = extractEntities(query);
   const domain = detectDomain(normalized);
 
+  const plan = buildExecutionPlan({
+    normalizedQuery: normalized,
+    intent,
+    entities,
+    domain
+  });
+
+  console.log("🧠 execution plan:", JSON.stringify(plan, null, 2));
+
   const crossPlan = detectCrossDatasetIntent(normalized, entities);
 
   if (crossPlan.type === "cross_dataset") {
     const sql = buildCrossDatasetSql({
       strategy: crossPlan.strategy,
       entities,
-      intent
+      intent,
+      plan
     });
 
     if (!sql) {
@@ -48,7 +59,8 @@ export async function handleChat(query) {
   const sql = buildSql({
     domain,
     entities,
-    intent
+    intent,
+    plan
   });
 
   if (!sql) {
