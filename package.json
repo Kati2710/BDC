@@ -13,6 +13,7 @@
     "@anthropic-ai/sdk": "^0.37.0",
     "cors": "^2.8.5",
     "duckdb": "^1.4.3",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
   }
 }
