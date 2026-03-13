@@ -2,7 +2,38 @@ function esc(value) {
   return String(value || "").replace(/'/g, "''");
 }
 
-function buildCnpjSancoesRecebimentosSql(plan) {
+function getPrimaryJoin(plan) {
+  return Array.isArray(plan?.joins) && plan.joins.length > 0 ? plan.joins[0] : null;
+}
+
+function isCnpjSancoesRecebimentos(plan) {
+  const join = getPrimaryJoin(plan);
+  if (!join) return false;
+
+  return (
+    plan?.filters?.cnpj &&
+    plan?.baseTable === "_ceis" &&
+    Array.isArray(plan?.relatedTables) &&
+    plan.relatedTables.includes("_despesas_favorecidos") &&
+    join.leftTable === "_ceis" &&
+    join.rightTable === "_despesas_favorecidos"
+  );
+}
+
+function isCpfServidoresImoveis(plan) {
+  const join = getPrimaryJoin(plan);
+  if (!join) return false;
+
+  return (
+    plan?.filters?.cpf &&
+    (
+      (join.leftTable === "_servidores" && join.rightTable === "_imoveisfuncionais") ||
+      (join.leftTable === "_imoveisfuncionais" && join.rightTable === "_servidores")
+    )
+  );
+}
+
+function buildCnpjSancoesRecebimentos(plan) {
   const cnpj = esc(plan.filters?.cnpj);
   const summary = plan.output === "summary";
 
@@ -163,7 +194,7 @@ LIMIT 100
 `.trim();
 }
 
-function buildCpfServidoresImoveisSql(plan) {
+function buildCpfServidoresImoveis(plan) {
   const cpf = esc(plan.filters?.cpf);
   const summary = plan.output === "summary";
 
@@ -266,19 +297,12 @@ LIMIT 100
 export function buildSqlFromPlan(plan) {
   if (!plan || !plan.mode) return null;
 
-  if (
-    plan.baseTable === "_ceis" &&
-    plan.relatedTables?.includes("_despesas_favorecidos") &&
-    plan.filters?.cnpj
-  ) {
-    return buildCnpjSancoesRecebimentosSql(plan);
+  if (isCnpjSancoesRecebimentos(plan)) {
+    return buildCnpjSancoesRecebimentos(plan);
   }
 
-  if (
-    plan.relatedTables?.includes("_imoveisfuncionais") &&
-    plan.filters?.cpf
-  ) {
-    return buildCpfServidoresImoveisSql(plan);
+  if (isCpfServidoresImoveis(plan)) {
+    return buildCpfServidoresImoveis(plan);
   }
 
   return null;
