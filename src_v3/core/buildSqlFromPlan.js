@@ -1,5 +1,40 @@
 import { buildSqlFromJoinSpec } from "./buildSqlFromJoinSpec.js";
 
+function esc(value) {
+  return String(value || "").replace(/'/g, "''");
+}
+
+function getPrimaryJoin(plan) {
+  return Array.isArray(plan?.joins) && plan.joins.length > 0 ? plan.joins[0] : null;
+}
+
+function isCnpjSancoesRecebimentos(plan) {
+  const join = getPrimaryJoin(plan);
+  if (!join) return false;
+
+  return (
+    !!plan?.filters?.cnpj &&
+    plan?.baseTable === "_ceis" &&
+    Array.isArray(plan?.relatedTables) &&
+    plan.relatedTables.includes("_despesas_favorecidos") &&
+    join.leftTable === "_ceis" &&
+    join.rightTable === "_despesas_favorecidos"
+  );
+}
+
+function isCpfServidoresImoveis(plan) {
+  const join = getPrimaryJoin(plan);
+  if (!join) return false;
+
+  return (
+    !!plan?.filters?.cpf &&
+    (
+      (join.leftTable === "_servidores" && join.rightTable === "_imoveisfuncionais") ||
+      (join.leftTable === "_imoveisfuncionais" && join.rightTable === "_servidores")
+    )
+  );
+}
+
 function buildCnpjSancoesRecebimentos(plan) {
   const cnpj = esc(plan.filters?.cnpj);
   const summary = plan.output === "summary";
@@ -82,4 +117,118 @@ function buildCnpjSancoesRecebimentos(plan) {
     detailOrderBy: `r.data_lancamento_real DESC NULLS LAST, r.valor_recebido_num DESC NULLS LAST`,
     limit: 100
   });
+}
+
+function buildCpfServidoresImoveis(plan) {
+  const cpf = esc(plan.filters?.cpf);
+  const summary = plan.output === "summary";
+
+  if (summary) {
+    return `
+WITH serv AS (
+  SELECT
+    CPF,
+    NOME,
+    ORGSUP_LOTACAO,
+    ORG_LOTACAO,
+    DESCRICAO_CARGO
+  FROM _servidores
+  WHERE CPF = '${cpf}'
+),
+imov AS (
+  SELECT
+    CPF,
+    "NOME PERMISSIONÁRIO" AS nome_permissionario,
+    "ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO" AS orgao_exercicio,
+    "DATA INÍCIO OCUPAÇÃO" AS data_inicio_ocupacao,
+    _audit_arquivo_csv_origem AS imovel_arquivo,
+    _audit_linha_csv AS imovel_linha,
+    _audit_url_download AS imovel_url,
+    _audit_data_disponibilizacao_gov AS imovel_data_base
+  FROM _imoveisfuncionais
+  WHERE CPF = '${cpf}'
+)
+SELECT
+  s.CPF,
+  s.NOME,
+  s.ORGSUP_LOTACAO,
+  s.ORG_LOTACAO,
+  s.DESCRICAO_CARGO,
+  COUNT(i.CPF) AS qtd_imoveis_funcionais,
+  MIN(i.data_inicio_ocupacao) AS primeira_ocupacao,
+  MAX(i.data_inicio_ocupacao) AS ultima_ocupacao,
+  MAX(i.imovel_arquivo) AS imovel_arquivo,
+  MAX(i.imovel_linha) AS imovel_linha,
+  MAX(i.imovel_url) AS imovel_url,
+  MAX(i.imovel_data_base) AS imovel_data_base
+FROM serv s
+LEFT JOIN imov i
+  ON i.CPF = s.CPF
+GROUP BY
+  s.CPF,
+  s.NOME,
+  s.ORGSUP_LOTACAO,
+  s.ORG_LOTACAO,
+  s.DESCRICAO_CARGO
+LIMIT 100
+`.trim();
+  }
+
+  return `
+WITH serv AS (
+  SELECT
+    CPF,
+    NOME,
+    ORGSUP_LOTACAO,
+    ORG_LOTACAO,
+    DESCRICAO_CARGO
+  FROM _servidores
+  WHERE CPF = '${cpf}'
+),
+imov AS (
+  SELECT
+    CPF,
+    "NOME PERMISSIONÁRIO" AS nome_permissionario,
+    "ÓRGÃO EXERCÍCIO DO PERMISSIONÁRIO" AS orgao_exercicio,
+    "DATA INÍCIO OCUPAÇÃO" AS data_inicio_ocupacao,
+    _audit_arquivo_csv_origem AS imovel_arquivo,
+    _audit_linha_csv AS imovel_linha,
+    _audit_url_download AS imovel_url,
+    _audit_data_disponibilizacao_gov AS imovel_data_base
+  FROM _imoveisfuncionais
+  WHERE CPF = '${cpf}'
+)
+SELECT
+  s.CPF,
+  s.NOME,
+  s.ORGSUP_LOTACAO,
+  s.ORG_LOTACAO,
+  s.DESCRICAO_CARGO,
+  i.nome_permissionario,
+  i.orgao_exercicio,
+  i.data_inicio_ocupacao,
+  i.imovel_arquivo,
+  i.imovel_linha,
+  i.imovel_url,
+  i.imovel_data_base
+FROM serv s
+LEFT JOIN imov i
+  ON i.CPF = s.CPF
+ORDER BY i.data_inicio_ocupacao DESC NULLS LAST
+LIMIT 100
+`.trim();
+}
+
+export function buildSqlFromPlan(plan) {
+  if (!plan || !plan.mode) return null;
+
+  if (isCnpjSancoesRecebimentos(plan)) {
+    return buildCnpjSancoesRecebimentos(plan);
+  }
+
+  if (isCpfServidoresImoveis(plan)) {
+    return buildCpfServidoresImoveis(plan);
+  }
+
+  return null;
 }
