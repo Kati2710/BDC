@@ -5,22 +5,25 @@ export const SEMANTIC_DOMAIN_MAP = {
     "viajou",
     "viajar",
     "passagem",
+    "passagens",
     "diaria",
-    "diárias"
+    "diarias"
   ],
 
   sancoes: [
     "ceis",
-    "sanção",
-    "sanções",
+    "sancao",
+    "sancoes",
     "punido",
     "impedimento",
-    "suspensão"
+    "suspensao",
+    "inidonea",
+    "inidoneo"
   ],
 
   acordos: [
     "acordo de leniencia",
-    "leniência",
+    "leniencia",
     "acordo leniencia",
     "acordos"
   ],
@@ -30,19 +33,24 @@ export const SEMANTIC_DOMAIN_MAP = {
     "empresa",
     "receita federal",
     "socios",
-    "sócios"
+    "socio",
+    "razao social"
   ],
 
   servidores: [
     "servidor",
     "servidores",
-    "funcionario publico"
+    "funcionario publico",
+    "funcionario federal"
   ],
 
   despesas: [
     "despesa",
+    "despesas",
     "gasto",
+    "gastos",
     "pagamento",
+    "pagamentos",
     "favorecido"
   ]
 };
