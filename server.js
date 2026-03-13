@@ -2,66 +2,73 @@ import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
 import { createRequire } from "module";
-import { existsSync } from "fs";
+import crypto from "crypto";
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+/* ========================= ENV / CONFIG ========================= */
 const HETZNER_API = process.env.HETZNER_API_BASE || "http://89.167.48.3:5010";
-const HETZNER_KEY = process.env.HETZNER_API_KEY || "bdc-sql-api-key-2026-segura";
-const anthropic   = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const TAVILY_KEY  = process.env.TAVILY_API_KEY   || "";
-const S2_KEY      = process.env.S2_API_KEY        || "luDwHjoEjo9o0YcfcNi4J6f88oXQ9Um7VQkWCncj";
+const HETZNER_KEY = process.env.HETZNER_API_KEY;
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const TAVILY_KEY = process.env.TAVILY_API_KEY || "";
+const S2_KEY = process.env.S2_API_KEY || "";
+const PORT = Number(process.env.PORT || 10000);
 
-/* ─── SCHEMA DINÂMICO ─── */
+if (!HETZNER_KEY) throw new Error("HETZNER_API_KEY ausente");
+if (!ANTHROPIC_KEY) throw new Error("ANTHROPIC_API_KEY ausente");
+
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_KEY });
+
+/* ========================= SCHEMA DINÂMICO ========================= */
 let SCHEMA = {};
 try {
   const require = createRequire(import.meta.url);
   SCHEMA = require("./schema_compact.json");
   console.log(`📋 Schema carregado: ${Object.keys(SCHEMA).length} tabelas`);
-} catch (e) {
+} catch {
   console.warn("⚠️ schema_compact.json não encontrado — schema injection desativado");
 }
 
 const TABLE_KEYWORDS = {
-  "_bolsafamilia_pagamentos":           ["bolsa família","bolsa familia","bolsafamilia"],
-  "_bolsafamilia_saques":               ["saque bolsa","bolsa família saque"],
-  "_novobolsafamilia":                  ["novo bolsa","bolsa família 202","bolsa familia 202"],
-  "_bpc":                               ["bpc","prestação continuada","benefício assistencial"],
-  "_auxilioemergencial":                ["auxílio emergencial","auxilio emergencial","covid"],
-  "_auxiliobrasil":                     ["auxílio brasil","auxilio brasil"],
-  "_segurodefeso":                      ["seguro defeso","pescador"],
-  "_garantiasafra":                     ["garantia safra","safra"],
-  "_pedemeia":                          ["pé de meia","pe de meia","poupança escolar"],
-  "_peti":                              ["peti","trabalho infantil"],
-  "_auxilioreconstrucao":               ["auxílio reconstrução","auxilio reconstrucao","enchente","calamidade"],
-  "_ceis":                              ["ceis","sancionad","impedid","inidone","lista negra"],
-  "_cnep":                              ["cnep","multa empresa","dissolução compulsória"],
-  "_ceaf":                              ["ceaf","demitid","cassação aposentadoria","perda emprego"],
-  "_cepim":                             ["cepim","entidade impedida","impedimento convênio"],
-  "_acordos":                           ["acordo leniência","acordo leniencia","leniência","leniencia"],
-  "_pep":                               ["pep","politicamente exposto","pessoa política"],
-  "_despesas_favorecidos":              ["despesa","favorecido","recebeu recurso","valor recebido","recursos federais","pagamento federal"],
-  "_convenios":                         ["convênio","convenio","siconv","transferegov"],
-  "_licitacoes":                        ["licitação","licitacao","pregão","pregao","dispensa","concorrência"],
-  "_compras":                           ["compra","contrato federal","item compra"],
-  "_transferencias":                    ["transferência","transferencia","repasse federal","fundo a fundo"],
-  "_viagens":                           ["viagem","diária","diaria","passagem","deslocamento","missão"],
-  "_cpgf":                              ["cartão corporativo","cartao corporativo","cpgf","cartão governo"],
-  "_cpcc":                              ["cpcc","cartão combustível"],
-  "_cpdc":                              ["cpdc","cartão convenio"],
-  "_servidores":                        ["servidor","servidora","funcionário federal","funcionario federal","cargo federal","lotação","remuneração federal","salário federal"],
-  "_imoveisfuncionais":                 ["imóvel funcional","imovel funcional","residência funcional"],
-  "_renunciasfiscais":                  ["renúncia fiscal","renuncia fiscal","benefício fiscal","isenção fiscal"],
-  "_orcamentodadespesa":                ["orçamento","orcamento","dotação","loa","ploa"],
-  "_execucaodareceita":                 ["receita federal","arrecadação","arrecadacao","execução receita"],
-  "_emendasparlamentarespordocumento":  ["emenda parlamentar","emenda","parlamentar"],
-  "_notasfiscais":                      ["nota fiscal","nfe","chave acesso"],
-  "_rfb_empresas":                      ["empresa","cnpj","razão social","razao social","capital social","porte","mei","microempresa","natureza juridica"],
-  "_rfb_estabelecimentos":              ["estabelecimento","cnae","situacao cadastral","ativa","baixada","inapta","matriz","filial","municipio empresa","uf empresa"],
-  "_rfb_socios":                        ["sócio","socio","quadro societario","representante legal","participação societária"],
-  "_rfb_simples":                       ["simples nacional","simples","optante simples","mei optante"],
+  "_bolsafamilia_pagamentos": ["bolsa família", "bolsa familia", "bolsafamilia"],
+  "_bolsafamilia_saques": ["saque bolsa", "bolsa família saque"],
+  "_novobolsafamilia": ["novo bolsa", "bolsa família 202", "bolsa familia 202"],
+  "_bpc": ["bpc", "prestação continuada", "benefício assistencial"],
+  "_auxilioemergencial": ["auxílio emergencial", "auxilio emergencial", "covid"],
+  "_auxiliobrasil": ["auxílio brasil", "auxilio brasil"],
+  "_segurodefeso": ["seguro defeso", "pescador"],
+  "_garantiasafra": ["garantia safra", "safra"],
+  "_pedemeia": ["pé de meia", "pe de meia", "poupança escolar"],
+  "_peti": ["peti", "trabalho infantil"],
+  "_auxilioreconstrucao": ["auxílio reconstrução", "auxilio reconstrucao", "enchente", "calamidade"],
+  "_ceis": ["ceis", "sancionad", "impedid", "inidone", "lista negra"],
+  "_cnep": ["cnep", "multa empresa", "dissolução compulsória"],
+  "_ceaf": ["ceaf", "demitid", "cassação aposentadoria", "perda emprego"],
+  "_cepim": ["cepim", "entidade impedida", "impedimento convênio"],
+  "_acordos": ["acordo leniência", "acordo leniencia", "leniência", "leniencia"],
+  "_pep": ["pep", "politicamente exposto", "pessoa política"],
+  "_despesas_favorecidos": ["despesa", "favorecido", "recebeu recurso", "valor recebido", "recursos federais", "pagamento federal"],
+  "_convenios": ["convênio", "convenio", "siconv", "transferegov"],
+  "_licitacoes": ["licitação", "licitacao", "pregão", "pregao", "dispensa", "concorrência"],
+  "_compras": ["compra", "contrato federal", "item compra"],
+  "_transferencias": ["transferência", "transferencia", "repasse federal", "fundo a fundo"],
+  "_viagens": ["viagem", "diária", "diaria", "passagem", "deslocamento", "missão"],
+  "_cpgf": ["cartão corporativo", "cartao corporativo", "cpgf", "cartão governo"],
+  "_cpcc": ["cpcc", "cartão combustível"],
+  "_cpdc": ["cpdc", "cartão convenio"],
+  "_servidores": ["servidor", "servidora", "funcionário federal", "funcionario federal", "cargo federal", "lotação", "remuneração federal", "salário federal"],
+  "_imoveisfuncionais": ["imóvel funcional", "imovel funcional", "residência funcional"],
+  "_renunciasfiscais": ["renúncia fiscal", "renuncia fiscal", "benefício fiscal", "isenção fiscal"],
+  "_orcamentodadespesa": ["orçamento", "orcamento", "dotação", "loa", "ploa"],
+  "_execucaodareceita": ["receita federal", "arrecadação", "arrecadacao", "execução receita"],
+  "_emendasparlamentarespordocumento": ["emenda parlamentar", "emenda", "parlamentar"],
+  "_notasfiscais": ["nota fiscal", "nfe", "chave acesso"],
+  "_rfb_empresas": ["empresa", "cnpj", "razão social", "razao social", "capital social", "porte", "mei", "microempresa", "natureza juridica"],
+  "_rfb_estabelecimentos": ["estabelecimento", "cnae", "situacao cadastral", "ativa", "baixada", "inapta", "matriz", "filial", "municipio empresa", "uf empresa"],
+  "_rfb_socios": ["sócio", "socio", "quadro societario", "representante legal", "participação societária"],
+  "_rfb_simples": ["simples nacional", "simples", "optante simples", "mei optante"],
 };
 
 function getSchemaBlock(query) {
@@ -69,14 +76,15 @@ function getSchemaBlock(query) {
   const matched = new Set();
 
   for (const [table, keywords] of Object.entries(TABLE_KEYWORDS)) {
-    if (keywords.some(k => q.includes(k))) {
-      matched.add(table);
-    }
+    if (keywords.some((k) => q.includes(k))) matched.add(table);
   }
 
-  // RFB: se detectar empresa/cnpj, inclui todas as 4 tabelas RFB
-  const empresaKw = ["empresa","cnpj","razão social","razao social","inapt","baix","ativ","estabelecimento","sócio","socio","capital social","cnae","porte","matriz","filial","mei","microempresa"];
-  if (empresaKw.some(k => q.includes(k))) {
+  const empresaKw = [
+    "empresa", "cnpj", "razão social", "razao social", "inapt", "baix", "ativ",
+    "estabelecimento", "sócio", "socio", "capital social", "cnae", "porte",
+    "matriz", "filial", "mei", "microempresa"
+  ];
+  if (empresaKw.some((k) => q.includes(k))) {
     matched.add("_rfb_empresas");
     matched.add("_rfb_estabelecimentos");
     matched.add("_rfb_socios");
@@ -88,7 +96,7 @@ function getSchemaBlock(query) {
   const lines = [];
   for (const table of matched) {
     if (SCHEMA[table]) {
-      const cols = SCHEMA[table].filter(c => !c.startsWith("_audit"));
+      const cols = SCHEMA[table].filter((c) => !c.startsWith("_audit"));
       lines.push(`${table}: ${cols.join(", ")}`);
     }
   }
@@ -97,9 +105,10 @@ function getSchemaBlock(query) {
   return `\n== SCHEMA EXATO (use SOMENTE estas colunas — não invente outras) ==\n${lines.join("\n")}\n`;
 }
 
-/* ─── TAVILY WEB SEARCH ─── */
+/* ========================= EXTERNAL SEARCH ========================= */
 async function tavilySearch(query, maxResults = 5) {
   if (!TAVILY_KEY) return null;
+
   try {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
@@ -111,20 +120,31 @@ async function tavilySearch(query, maxResults = 5) {
         search_depth: "advanced",
         include_answer: true,
         include_domains: [
-          "portaldatransparencia.gov.br", "cgu.gov.br", "rfb.gov.br",
-          "gov.br", "ibge.gov.br", "bcb.gov.br", "tcu.gov.br",
-          "g1.globo.com", "uol.com.br", "valor.com.br", "agenciabrasil.ebc.com.br"
+          "portaldatransparencia.gov.br",
+          "cgu.gov.br",
+          "rfb.gov.br",
+          "gov.br",
+          "ibge.gov.br",
+          "bcb.gov.br",
+          "tcu.gov.br",
+          "g1.globo.com",
+          "uol.com.br",
+          "valor.com.br",
+          "agenciabrasil.ebc.com.br"
         ]
       }),
       signal: AbortSignal.timeout(10000)
     });
+
     if (!res.ok) return null;
     const d = await res.json();
+
     return {
       answer: d.answer || null,
-      results: (d.results || []).map(r => ({
-        title: r.title, url: r.url,
-        content: r.content?.slice(0, 500),
+      results: (d.results || []).map((r) => ({
+        title: r.title,
+        url: r.url,
+        content: r.content?.slice(0, 500) || "",
         published_date: r.published_date || null
       }))
     };
@@ -134,25 +154,30 @@ async function tavilySearch(query, maxResults = 5) {
   }
 }
 
-/* ─── SEMANTIC SCHOLAR ─── */
 async function s2Search(query, limit = 5) {
+  if (!S2_KEY) return null;
+
   try {
     const params = new URLSearchParams({
-      query, limit,
-      fields: "title,authors,year,abstract,externalIds,openAccessPdf,citationCount"
+      query,
+      limit: String(limit),
+      fields: "title,authors,year,abstract,externalIds,openAccessPdf,citationCount,paperId"
     });
-    const res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/search?${params}`, {
+
+    const res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/search?${params.toString()}`, {
       headers: { "x-api-key": S2_KEY },
       signal: AbortSignal.timeout(8000)
     });
+
     if (!res.ok) return null;
     const d = await res.json();
-    return (d.data || []).slice(0, limit).map(p => ({
+
+    return (d.data || []).slice(0, limit).map((p) => ({
       title: p.title,
-      authors: (p.authors || []).slice(0, 3).map(a => a.name).join(", "),
+      authors: (p.authors || []).slice(0, 3).map((a) => a.name).join(", "),
       year: p.year,
-      abstract: p.abstract?.slice(0, 400),
-      url: p.openAccessPdf?.url || `https://www.semanticscholar.org/paper/${p.paperId}`,
+      abstract: p.abstract?.slice(0, 400) || "",
+      url: p.openAccessPdf?.url || (p.paperId ? `https://www.semanticscholar.org/paper/${p.paperId}` : null),
       citations: p.citationCount || 0
     }));
   } catch (e) {
@@ -161,19 +186,29 @@ async function s2Search(query, limit = 5) {
   }
 }
 
-function needsExternalContext(query, rowCount, sql) {
+function needsExternalContext(query, rowCount) {
   const q = query.toLowerCase();
+
   const noData = rowCount === 0;
-  const contextKeywords = ["escândalo","investigação","cpi","operação","notícia","recente",
-    "contexto","histórico","por que","análise","impacto","consequência",
-    "processo","denúncia","acusação","preso","condenado"];
-  const hasContextKw = contextKeywords.some(k => q.includes(k));
-  const s2Keywords = ["estudo","pesquisa","artigo","literatura","acadêmico",
-    "setor","indústria","correlação","evidência","análise setorial"];
-  const hasS2Kw = s2Keywords.some(k => q.includes(k));
-  return { needsWeb: noData || hasContextKw, needsS2: hasS2Kw };
+  const explicitWebIntent = [
+    "notícia", "noticias", "recente", "recentes", "contexto", "histórico", "historico",
+    "por que", "análise", "analise", "impacto", "consequência", "consequencia",
+    "escândalo", "escandalo", "investigação", "investigacao", "cpi", "operação",
+    "operacao", "denúncia", "denuncia", "acusação", "acusacao", "preso", "condenado"
+  ].some((k) => q.includes(k));
+
+  const explicitAcademicIntent = [
+    "estudo", "pesquisa", "artigo", "literatura", "acadêmico", "academico",
+    "correlação", "correlacao", "evidência", "evidencia", "análise setorial", "analise setorial"
+  ].some((k) => q.includes(k));
+
+  return {
+    needsWeb: noData || explicitWebIntent,
+    needsS2: explicitAcademicIntent
+  };
 }
 
+/* ========================= CATALOG ========================= */
 const DB_CATALOG = `
 BANCO: brazildatacorp.duckdb | 7B linhas | 41 tabelas | DuckDB
 
@@ -192,6 +227,7 @@ BANCO: brazildatacorp.duckdb | 7B linhas | 41 tabelas | DuckDB
 - DATAS VARCHAR em viagens: SUBSTRING("Período - Data de início",1,4) para ano
 - CNAES em array: use array_contains(cnaes_secundarios_codigos, '6201') — NUNCA LIKE em array
 - BUSCA POR NOME DE PESSOA: SEMPRE use ILIKE '%nome%' — NUNCA use = 'nome exato' pois nomes têm variações de grafia
+- NUNCA use tabelas antigas _empresas_UF. Use somente _rfb_empresas, _rfb_estabelecimentos, _rfb_socios, _rfb_simples.
 
 == EMPRESAS RFB — ARQUITETURA (4 tabelas unificadas, todas as UFs) ==
 _rfb_empresas(66M): cnpj_basico(VARCHAR), razao_social, natureza_juridica_codigo, natureza_juridica, qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social(DOUBLE), porte_codigo, porte('MICRO EMPRESA'|'EMPRESA DE PEQUENO PORTE'|'DEMAIS'), ente_federativo
@@ -307,68 +343,190 @@ WHERE d."Ano e mês do lançamento" LIKE '%/2024'
 GROUP BY s.cnpj ORDER BY total DESC LIMIT 20
 `;
 
-/* ========================= SQL AUTO-FIX ========================= */
+/* ========================= HELPERS ========================= */
 function applySqlAutoFix(sql) {
   let s = sql || "";
 
   s = s.replace(/TRY_STRPTIME\(([^,]+),\s*'%d\/%m\/%Y'\)/g,
-    `COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))`);
+    "COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))");
   s = s.replace(/TRY_STRPTIME\(([^,]+),\s*'%Y-%m-%d'\)/g,
-    `COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))`);
+    "COALESCE(TRY_STRPTIME($1, '%d/%m/%Y'), TRY_STRPTIME($1, '%Y-%m-%d'))");
+
   s = s.replace(/"Início do afastamento"/g, "DATA_INICIO_AFASTAMENTO");
   s = s.replace(/"Fim do afastamento"/g, "DATA_FIM_AFASTAMENTO");
   s = s.replace(/"SITUAÇÃO DO ACORDO"(?! DE LENIÊNICA)/g, '"SITUAÇÃO DO ACORDO DE LENIÊNICA"');
   s = s.replace(/"CNPJ OU CPF DO SANCIONADO"/g, '"CPF OU CNPJ DO SANCIONADO"');
-  // Corrige ILIKE(col, 'val') → col ILIKE 'val'
-  s = s.replace(/\bILIKE\(([^,]+),\s*('[^']*')\)/g, '$1 ILIKE $2');
+  s = s.replace(/\bILIKE\(([^,]+),\s*('[^']*')\)/g, "$1 ILIKE $2");
   s = s.replace(/"TIPO SANÇÃO"/g, '"CATEGORIA DA SANÇÃO"');
-  // Corrige referências às antigas tabelas _empresas_UF
-  s = s.replace(/_empresas_[a-z]{2}\b/g, (match) => {
-    const uf = match.replace('_empresas_', '').toUpperCase();
-    return `_rfb_estabelecimentos WHERE uf='${uf}'`;
-  });
+
   s = s.replace(/SUBSTRING\("DATA LANÇAMENTO",\s*1,\s*7\)/g, 'SUBSTRING(CAST("DATA LANÇAMENTO" AS VARCHAR),1,7)');
-  s = s.replace(/SUBSTRING\(("Data Emissão"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
-  s = s.replace(/SUBSTRING\(("Período - Data de início"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
-  s = s.replace(/SUBSTRING\(("Período - Data de fim"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
-  s = s.replace(/SUBSTRING\(("DATA SAQUE"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
-  s = s.replace(/SUBSTRING\(("Data_Início_Exercício"),\s*1,\s*(\d+)\)/g, 'SUBSTRING(CAST($1 AS VARCHAR),1,$2)');
+  s = s.replace(/SUBSTRING\(("Data Emissão"),\s*1,\s*(\d+)\)/g, "SUBSTRING(CAST($1 AS VARCHAR),1,$2)");
+  s = s.replace(/SUBSTRING\(("Período - Data de início"),\s*1,\s*(\d+)\)/g, "SUBSTRING(CAST($1 AS VARCHAR),1,$2)");
+  s = s.replace(/SUBSTRING\(("Período - Data de fim"),\s*1,\s*(\d+)\)/g, "SUBSTRING(CAST($1 AS VARCHAR),1,$2)");
+  s = s.replace(/SUBSTRING\(("DATA SAQUE"),\s*1,\s*(\d+)\)/g, "SUBSTRING(CAST($1 AS VARCHAR),1,$2)");
+  s = s.replace(/SUBSTRING\(("Data_Início_Exercício"),\s*1,\s*(\d+)\)/g, "SUBSTRING(CAST($1 AS VARCHAR),1,$2)");
 
   const monetaryCols = [
-    '"Valor diárias"', '"Valor passagens"', '"Valor Licitação"',
-    '"VALOR TRANSFERIDO"', '"VALOR LIBERADO"', '"VALOR CONVÊNIO"',
-    '"Valor Renúncia Fiscal (R$)"', '"ORÇAMENTO REALIZADO (R$)"',
+    '"Valor diárias"',
+    '"Valor passagens"',
+    '"Valor Licitação"',
+    '"VALOR TRANSFERIDO"',
+    '"VALOR LIBERADO"',
+    '"VALOR CONVÊNIO"',
+    '"Valor Renúncia Fiscal (R$)"',
+    '"ORÇAMENTO REALIZADO (R$)"',
   ];
+
   for (const col of monetaryCols) {
-    const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const alreadyDouble = new RegExp(`REPLACE\\(REPLACE\\(${escaped}`);
     if (!alreadyDouble.test(s)) {
-      const single = new RegExp(`REPLACE\\(${escaped},\\s*'\\.',\\s*''\\)`, 'g');
+      const single = new RegExp(`REPLACE\\(${escaped},\\s*'\\.',\\s*''\\)`, "g");
       s = s.replace(single, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
-      const comma = new RegExp(`REPLACE\\(${escaped},\\s*',',\\s*'\\.'\\)`, 'g');
+      const comma = new RegExp(`REPLACE\\(${escaped},\\s*',',\\s*'\\.'\\)`, "g");
       s = s.replace(comma, `REPLACE(REPLACE(${col}, '.', ''), ',', '.')`);
     }
   }
+
   return s;
+}
+
+function validateReadOnlySql(sql) {
+  const normalized = (sql || "").trim().replace(/\s+/g, " ").toLowerCase();
+
+  if (!(normalized.startsWith("select") || normalized.startsWith("with"))) {
+    throw new Error("Apenas consultas SELECT/WITH são permitidas");
+  }
+
+  if (/_empresas_[a-z]{2}\b/i.test(normalized)) {
+    throw new Error("SQL referenciou tabela antiga _empresas_UF; use _rfb_estabelecimentos com filtro por uf");
+  }
+
+  const forbidden = [
+    /\bdelete\b/,
+    /\binsert\b/,
+    /\bupdate\b/,
+    /\bdrop\b/,
+    /\balter\b/,
+    /\btruncate\b/,
+    /\bcreate\b/,
+    /\breplace\s+into\b/,
+    /\battach\b/,
+    /\bdetach\b/,
+    /\bcopy\b/,
+    /\bexport\b/,
+    /\bimport\b/,
+    /\bcall\b/,
+    /\bpragma\b/,
+    /\binstall\b/,
+    /\bload\b/,
+    /;/
+  ];
+
+  for (const pattern of forbidden) {
+    if (pattern.test(normalized)) {
+      throw new Error("SQL contém operação não permitida");
+    }
+  }
+
+  return true;
+}
+
+async function safeJson(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text || `HTTP ${response.status}` };
+  }
+}
+
+function maskDocument(value) {
+  if (value == null) return value;
+  const str = String(value).trim();
+
+  if (/^\d{11}$/.test(str)) {
+    return `${str.slice(0, 3)}.***.***-${str.slice(-2)}`;
+  }
+  if (/^\d{14}$/.test(str)) {
+    return `${str.slice(0, 2)}.***.***/****-${str.slice(-2)}`;
+  }
+
+  return value;
+}
+
+function maskSensitiveRows(rows = []) {
+  return rows.map((row) => {
+    const masked = { ...row };
+    for (const key of Object.keys(masked)) {
+      if (
+        /(cpf|cnpj)/i.test(key) &&
+        (typeof masked[key] === "string" || typeof masked[key] === "number")
+      ) {
+        masked[key] = maskDocument(masked[key]);
+      }
+    }
+    return masked;
+  });
+}
+
+function extractSources(rows = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const row of rows) {
+    const arquivo = row?._audit_arquivo_csv_origem || row?.fonte_arquivo || null;
+    const linha = row?._audit_linha_csv ?? row?.fonte_linha ?? null;
+    const url = row?._audit_url_download || row?.fonte_url || null;
+    const data = row?._audit_data_disponibilizacao_gov || row?.fonte_data || null;
+
+    const key = JSON.stringify([arquivo, linha, url, data]);
+    if (!seen.has(key) && (arquivo || url || data)) {
+      seen.add(key);
+      out.push({
+        arquivo,
+        linha,
+        url,
+        data_disponibilizacao: data
+      });
+    }
+  }
+
+  return out;
+}
+
+function computeConfidence({ rowCount, usedWeb, sql }) {
+  if (!sql) return "low";
+  if (usedWeb && rowCount === 0) return "medium";
+  if (rowCount > 0) return "high";
+  return "low";
 }
 
 /* ========================= MAIN HANDLER ========================= */
 app.post("/chat", async (req, res) => {
   const start = Date.now();
+  const requestId = crypto.randomUUID();
   const query = (req.body?.query || "").trim();
 
-  if (!query) return res.json({ error: "Query vazia" });
+  if (!query) {
+    return res.status(400).json({
+      ok: false,
+      error: "Query vazia",
+      request_id: requestId,
+      duration_ms: Date.now() - start
+    });
+  }
 
   try {
-    console.log(`\n${"=".repeat(60)}\n❓ "${query}"\n${"=".repeat(60)}`);
+    console.log(`\n${"=".repeat(60)}\n[${requestId}] ❓ "${query}"\n${"=".repeat(60)}`);
 
     const schemaBlock = getSchemaBlock(query);
     if (schemaBlock) {
-      const tables = (schemaBlock.match(/^_\w+:/gm) || []).map(t => t.replace(':',''));
-      console.log(`📋 Schema injetado para: ${tables.join(', ')}`);
+      const tables = (schemaBlock.match(/^_\w+:/gm) || []).map((t) => t.replace(":", ""));
+      console.log(`[${requestId}] 📋 Schema injetado para: ${tables.join(", ")}`);
     }
 
-    console.log("🤖 Claude gerando SQL...");
+    console.log(`[${requestId}] 🤖 Claude gerando SQL...`);
 
     const sqlGen = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
@@ -396,92 +554,169 @@ CASO 2 — Agregação (GROUP BY / COUNT / SUM): inclua na CTE ou subquery que l
   MAX(_audit_arquivo_csv_origem) as fonte_arquivo
   E propague essas colunas até o SELECT final.
 
-REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`
+REGRA ABSOLUTA:
+- Responda APENAS com SQL puro.
+- Zero palavras antes ou depois.
+- Zero explicações.
+- Zero markdown.
+- A primeira palavra da resposta deve ser SELECT ou WITH.
+- Somente leitura.
+- Nunca use tabelas _empresas_UF.`
       }]
     });
 
-    let sql = sqlGen.content.find(b => b.type === "text")?.text?.trim() || "";
+    let sql = sqlGen.content.find((b) => b.type === "text")?.text?.trim() || "";
     sql = sql.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
     sql = applySqlAutoFix(sql);
-    console.log(`📝 SQL: ${sql.substring(0, 300)}`);
+    validateReadOnlySql(sql);
+
+    console.log(`[${requestId}] 📝 SQL: ${sql.substring(0, 300)}`);
 
     const sqlLower = sql.toLowerCase();
     if (!sqlLower.startsWith("select") && !sqlLower.startsWith("with")) {
-      console.log("💬 Claude respondeu sem SQL — tentando contexto web...");
+      console.log(`[${requestId}] 💬 Claude respondeu sem SQL — tentando contexto web...`);
+
       let fallbackAnswer = sql;
       if (TAVILY_KEY) {
         const web = await tavilySearch(query, 4);
         if (web?.results?.length) {
-          const webCtx = web.results.map((r,i) => `[${i+1}] ${r.title}\nURL: ${r.url}\n${r.content||""}`).join("\n\n");
+          const webCtx = web.results
+            .map((r, i) => `[${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content || ""}`)
+            .join("\n\n");
+
           const fallback = await anthropic.messages.create({
             model: "claude-sonnet-4-20250514",
             max_tokens: 1500,
-            messages: [{ role: "user", content: `Pergunta: "${query}"\n\nOs dados não estão na base BDC. Use o contexto web abaixo para responder. Cite as fontes [1],[2] etc e inclua seção ## Fontes.\n\n${webCtx}` }]
+            messages: [{
+              role: "user",
+              content: `Pergunta: "${query}"
+
+Os dados não estão na base BDC. Use somente o contexto web abaixo para responder.
+Não invente fatos.
+Cite as fontes [1], [2] etc.
+Inclua seção ## Fontes.
+
+${webCtx}`
+            }]
           });
-          fallbackAnswer = fallback.content.find(b => b.type==="text")?.text || sql;
+
+          fallbackAnswer = fallback.content.find((b) => b.type === "text")?.text || sql;
         }
       }
-      return res.json({ answer: fallbackAnswer, sql: "", duration_ms: Date.now() - start, rows_returned: 0 });
+
+      return res.json({
+        ok: true,
+        answer: fallbackAnswer,
+        sql: "",
+        duration_ms: Date.now() - start,
+        rows_returned: 0,
+        conv_id: req.body?.conv_id || null,
+        request_id: requestId,
+        confidence: "low",
+        sources: [],
+        meta: {
+          used_web: !!TAVILY_KEY,
+          used_s2: false,
+          model_sql: "claude-haiku-4-5-20251001",
+          model_answer: "claude-sonnet-4-20250514"
+        }
+      });
     }
 
-    console.log("⚡ Executando...");
+    console.log(`[${requestId}] ⚡ Executando...`);
 
-    let data, sql_final = sql;
+    let data;
+    let sqlFinal = sql;
+
     for (let attempt = 1; attempt <= 2; attempt++) {
       const response = await fetch(`${HETZNER_API}/query_unified`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
-        body: JSON.stringify({ sql: sql_final }),
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": HETZNER_KEY
+        },
+        body: JSON.stringify({ sql: sqlFinal }),
         signal: AbortSignal.timeout(240000)
       });
-      data = await response.json();
+
+      data = await safeJson(response);
 
       if (!response.ok || data.error) {
-        if (attempt === 2) throw new Error(data.error || "Query falhou após 2 tentativas");
-        console.log(`⚠️ Tentativa ${attempt} falhou: ${data.error}`);
-        console.log("🔄 Haiku corrigindo SQL...");
+        if (attempt === 2) {
+          throw new Error(data.error || "Query falhou após 2 tentativas");
+        }
+
+        console.log(`[${requestId}] ⚠️ Tentativa ${attempt} falhou: ${data.error}`);
+        console.log(`[${requestId}] 🔄 Haiku corrigindo SQL...`);
+
         const fix = await anthropic.messages.create({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 2000,
-          messages: [{ role: "user", content:
-`Corrija este SQL DuckDB.
+          messages: [{
+            role: "user",
+            content: `Corrija este SQL DuckDB.
 
 PERGUNTA: "${query}"
 ${schemaBlock}
+
+REGRAS:
+- Responda APENAS com SQL corrigido.
+- Sem explicações.
+- Somente leitura.
+- Nunca use _empresas_UF.
+
 SQL COM ERRO:
-${sql_final}
+${sqlFinal}
 
 ERRO:
-${data.error}
-
-Responda APENAS com SQL corrigido, sem explicações.` }]
+${data.error}`
+          }]
         });
-        sql_final = fix.content.find(b => b.type==="text")?.text?.trim() || sql_final;
-        sql_final = sql_final.replace(/```sql\n?/g,"").replace(/```/g,"").trim();
-        sql_final = applySqlAutoFix(sql_final);
-        console.log(`🔄 SQL corrigido: ${sql_final.substring(0,200)}`);
+
+        sqlFinal = fix.content.find((b) => b.type === "text")?.text?.trim() || sqlFinal;
+        sqlFinal = sqlFinal.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
+        sqlFinal = applySqlAutoFix(sqlFinal);
+        validateReadOnlySql(sqlFinal);
+
+        console.log(`[${requestId}] 🔄 SQL corrigido: ${sqlFinal.substring(0, 200)}`);
       } else {
         break;
       }
     }
 
-    sql = sql_final;
-    console.log(`📊 ${data.row_count || 0} linhas retornadas`);
+    sql = sqlFinal;
+    const rowCount = Number(data.row_count || 0);
+    const rawRows = Array.isArray(data.rows) ? data.rows : [];
+    const safeRows = maskSensitiveRows(rawRows.slice(0, 50));
+    const sources = extractSources(rawRows);
 
-    const { needsWeb, needsS2 } = needsExternalContext(query, data.row_count || 0, sql);
-    let webContext = null, s2Context = null;
+    console.log(`[${requestId}] 📊 ${rowCount} linhas retornadas`);
+
+    const { needsWeb, needsS2 } = needsExternalContext(query, rowCount);
+    let webContext = null;
+    let s2Context = null;
 
     if (needsWeb && TAVILY_KEY) {
       webContext = await tavilySearch(query);
     }
-    if (needsS2) {
+    if (needsS2 && S2_KEY) {
       s2Context = await s2Search(query);
     }
 
-    const webSection = webContext ? `\nCONTEXTO WEB:\n${webContext.answer ? `Resumo: ${webContext.answer}\n` : ""}${webContext.results.map((r,i) => `[W${i+1}] ${r.title}\n     URL: ${r.url}\n     ${r.content || ""}`).join("\n")}` : "";
-    const s2Section = s2Context?.length ? `\nLITERATURA ACADÊMICA:\n${s2Context.map((p,i) => `[A${i+1}] ${p.title} (${p.year})\n     ${p.abstract || ""}`).join("\n\n")}` : "";
+    const webSection = webContext
+      ? `\nCONTEXTO WEB:\n${webContext.answer ? `Resumo: ${webContext.answer}\n` : ""}${webContext.results.map((r, i) =>
+          `[W${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content || ""}`
+        ).join("\n\n")}`
+      : "";
 
-    console.log("💬 Claude explicando...");
+    const s2Section = s2Context?.length
+      ? `\nLITERATURA ACADÊMICA:\n${s2Context.map((p, i) =>
+          `[A${i + 1}] ${p.title} (${p.year})\n${p.abstract || ""}`
+        ).join("\n\n")}`
+      : "";
+
+    console.log(`[${requestId}] 💬 Claude explicando...`);
+
     const explanation = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 2500,
@@ -494,8 +729,8 @@ PERGUNTA: "${query}"
 SQL EXECUTADO:
 ${sql}
 
-RESULTADOS (${data.row_count} linhas):
-${JSON.stringify(data.rows?.slice(0, 50), null, 2)}${webSection}${s2Section}
+RESULTADOS (${rowCount} linhas):
+${JSON.stringify(safeRows, null, 2)}${webSection}${s2Section}
 
 MAPEAMENTO TABELAS → INSTITUIÇÕES:
 - _ceis, _cnep, _ceaf, _cepim, _acordos → CGU – Portal da Transparência
@@ -509,55 +744,106 @@ MAPEAMENTO TABELAS → INSTITUIÇÕES:
 
 == RASTREABILIDADE — DIFERENCIAL BDC ==
 Os resultados contêm colunas _audit_* com a origem exata de cada dado.
-OBRIGATÓRIO: Use essas colunas para construir citações precisas.
+OBRIGATÓRIO: use essas colunas para construir citações precisas.
 
-Para cada dado relevante na resposta, cite no formato:
+Formato de citação:
 > 📄 Fonte: [nome_arquivo_csv] • Publicado em [data_disponibilizacao] • Linha [linha_csv]
 > 🔗 Download original: [url_download]
 
-Se os resultados tiverem fonte_url / fonte_arquivo / fonte_data (agregações), use-os da mesma forma.
+Se os resultados tiverem fonte_url / fonte_arquivo / fonte_data, use-os da mesma forma.
 
-Ao final, seção **## Fontes** listando todos os arquivos CSV originais citados com suas URLs.
-
-Isso prova que cada número vem de um arquivo oficial do governo — rastreável, verificável, auditável.
-
-Formate valores em R$. Seja preciso e objetivo.`
+Regras:
+- Use apenas os dados presentes em RESULTADOS e nos blocos CONTEXTO WEB / LITERATURA.
+- Não invente colunas, datas, totais, nomes ou interpretações não suportadas.
+- Se um dado não estiver explícito, diga que não foi encontrado.
+- Se houver ambiguidade de pessoa/nome, destaque isso claramente.
+- Mantenha CPFs e CNPJs mascarados na resposta textual.
+- Formate valores em R$.
+- Seja preciso e objetivo.
+- Ao final, inclua seção **## Fontes** listando os arquivos CSV originais citados com suas URLs.`
       }]
     });
 
-    const answer = explanation.content.find(b => b.type === "text")?.text || "Sem resposta";
-    console.log(`✅ CONCLUÍDO em ${Date.now() - start}ms`);
+    const answer = explanation.content.find((b) => b.type === "text")?.text || "Sem resposta";
+    const duration = Date.now() - start;
 
-    const convId   = req.body?.conv_id || null;
-    const userEmail= req.body?.user    || "anonymous";
-    let   savedConvId = convId;
-    (async () => {
-      try {
-        const r1 = await fetch(`${HETZNER_API}/conversations/message`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
-          body: JSON.stringify({ user: userEmail, conv_id: convId, role: "user", content: query })
-        });
-        const d1 = await r1.json();
-        savedConvId = d1.conv_id;
-        await fetch(`${HETZNER_API}/conversations/message`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
-          body: JSON.stringify({
-            user: userEmail, conv_id: savedConvId, role: "assistant",
-            content: answer, sql_used: sql,
-            row_count: data.row_count || 0, duration_ms: Date.now() - start
-          })
-        });
-        console.log(`💾 Salvo conv_id: ${savedConvId}`);
-      } catch(e) { console.warn("⚠️ Erro ao salvar conversa:", e.message); }
-    })();
+    console.log(`[${requestId}] 💾 Salvando conversa...`);
 
-    return res.json({ answer, sql, duration_ms: Date.now() - start, rows_returned: data.row_count, conv_id: savedConvId });
+    const convId = req.body?.conv_id || null;
+    const userEmail = req.body?.user || "anonymous";
+    let savedConvId = convId;
 
+    try {
+      const r1 = await fetch(`${HETZNER_API}/conversations/message`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": HETZNER_KEY
+        },
+        body: JSON.stringify({
+          user: userEmail,
+          conv_id: convId,
+          role: "user",
+          content: query
+        })
+      });
+
+      const d1 = await safeJson(r1);
+      savedConvId = d1.conv_id || convId;
+
+      await fetch(`${HETZNER_API}/conversations/message`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": HETZNER_KEY
+        },
+        body: JSON.stringify({
+          user: userEmail,
+          conv_id: savedConvId,
+          role: "assistant",
+          content: answer,
+          sql_used: sql,
+          row_count: rowCount,
+          duration_ms: duration
+        })
+      });
+
+      console.log(`[${requestId}] ✅ Conversa salva: ${savedConvId}`);
+    } catch (e) {
+      console.warn(`[${requestId}] ⚠️ Erro ao salvar conversa:`, e.message);
+    }
+
+    const usedWeb = !!webContext;
+    const usedS2 = !!(s2Context?.length);
+    const confidence = computeConfidence({ rowCount, usedWeb, sql });
+
+    console.log(`[${requestId}] ✅ CONCLUÍDO em ${duration}ms`);
+
+    return res.json({
+      ok: true,
+      answer,
+      sql,
+      duration_ms: duration,
+      rows_returned: rowCount,
+      conv_id: savedConvId,
+      request_id: requestId,
+      confidence,
+      sources,
+      meta: {
+        used_web: usedWeb,
+        used_s2: usedS2,
+        model_sql: "claude-haiku-4-5-20251001",
+        model_answer: "claude-sonnet-4-20250514"
+      }
+    });
   } catch (err) {
-    console.error("❌ ERRO:", err.message);
-    return res.status(500).json({ error: err.message, duration_ms: Date.now() - start });
+    console.error(`[${requestId}] ❌ ERRO:`, err.message);
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+      request_id: requestId,
+      duration_ms: Date.now() - start
+    });
   }
 });
 
@@ -565,46 +851,74 @@ Formate valores em R$. Seja preciso e objetivo.`
 app.get("/conversations", async (req, res) => {
   try {
     const user = req.query.user || "";
-    const r = await fetch(`${HETZNER_API}/conversations?user=${encodeURIComponent(user)}`, { headers: { "X-API-Key": HETZNER_KEY } });
-    res.json(await r.json());
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const r = await fetch(`${HETZNER_API}/conversations?user=${encodeURIComponent(user)}`, {
+      headers: { "X-API-Key": HETZNER_KEY }
+    });
+    res.status(r.status).json(await safeJson(r));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.get("/conversations/:id", async (req, res) => {
   try {
-    const r = await fetch(`${HETZNER_API}/conversations/${req.params.id}`, { headers: { "X-API-Key": HETZNER_KEY } });
-    res.json(await r.json());
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const r = await fetch(`${HETZNER_API}/conversations/${req.params.id}`, {
+      headers: { "X-API-Key": HETZNER_KEY }
+    });
+    res.status(r.status).json(await safeJson(r));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.post("/conversations/message", async (req, res) => {
   try {
     const r = await fetch(`${HETZNER_API}/conversations/message`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": HETZNER_KEY },
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": HETZNER_KEY
+      },
       body: JSON.stringify(req.body)
     });
-    res.json(await r.json());
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.status(r.status).json(await safeJson(r));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.delete("/conversations/:id", async (req, res) => {
   try {
-    const r = await fetch(`${HETZNER_API}/conversations/${req.params.id}`, { method: "DELETE", headers: { "X-API-Key": HETZNER_KEY } });
-    res.json(await r.json());
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const r = await fetch(`${HETZNER_API}/conversations/${req.params.id}`, {
+      method: "DELETE",
+      headers: { "X-API-Key": HETZNER_KEY }
+    });
+    res.status(r.status).json(await safeJson(r));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.get("/health", async (_, res) => {
   try {
-    const r = await fetch(`${HETZNER_API}/health`, { headers: { "X-API-Key": HETZNER_KEY }, signal: AbortSignal.timeout(5000) });
-    res.json({ ok: true, hetzner: r.ok });
+    const r = await fetch(`${HETZNER_API}/health`, {
+      headers: { "X-API-Key": HETZNER_KEY },
+      signal: AbortSignal.timeout(5000)
+    });
+
+    res.json({
+      ok: true,
+      hetzner: r.ok
+    });
   } catch {
-    res.json({ ok: true, hetzner: false });
+    res.json({
+      ok: true,
+      hetzner: false
+    });
   }
 });
 
-const PORT = process.env.PORT || 10000;
+/* ========================= START ========================= */
 app.listen(PORT, () => {
   console.log("═".repeat(60));
   console.log("🚀 BDC — BRAZILDATACORP");
