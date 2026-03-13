@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
@@ -84,6 +87,7 @@ function getSchemaBlock(query) {
     "estabelecimento", "sócio", "socio", "capital social", "cnae", "porte",
     "matriz", "filial", "mei", "microempresa"
   ];
+
   if (empresaKw.some((k) => q.includes(k))) {
     matched.add("_rfb_empresas");
     matched.add("_rfb_estabelecimentos");
@@ -282,7 +286,7 @@ _viagens(50M): "Identificador do processo de viagem","CPF viajante","Nome","Carg
 -- SANÇÕES --
 _ceis(22K): "TIPO DE PESSOA","CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE),"DATA FINAL SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR"
 _cnep(2K): mesmo schema +"VALOR DA MULTA"
-_ceaf(4K): "CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE)
+_ceAF(4K): "CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE)
 _cepim(4K): "CNPJ ENTIDADE","NOME ENTIDADE","MOTIVO DO IMPEDIMENTO"
 _acordos(298): "CNPJ DO SANCIONADO","RAZÃO SOCIAL – CADASTRO RECEITA","SITUAÇÃO DO ACORDO DE LENIÊNICA","DATA DE INÍCIO DO ACORDO"(DATE)
 
@@ -459,10 +463,7 @@ function maskSensitiveRows(rows = []) {
   return rows.map((row) => {
     const masked = { ...row };
     for (const key of Object.keys(masked)) {
-      if (
-        /(cpf|cnpj)/i.test(key) &&
-        (typeof masked[key] === "string" || typeof masked[key] === "number")
-      ) {
+      if (/(cpf|cnpj)/i.test(key) && (typeof masked[key] === "string" || typeof masked[key] === "number")) {
         masked[key] = maskDocument(masked[key]);
       }
     }
@@ -483,12 +484,7 @@ function extractSources(rows = []) {
     const key = JSON.stringify([arquivo, linha, url, data]);
     if (!seen.has(key) && (arquivo || url || data)) {
       seen.add(key);
-      out.push({
-        arquivo,
-        linha,
-        url,
-        data_disponibilizacao: data
-      });
+      out.push({ arquivo, linha, url, data_disponibilizacao: data });
     }
   }
 
@@ -577,9 +573,13 @@ REGRA ABSOLUTA:
       console.log(`[${requestId}] 💬 Claude respondeu sem SQL — tentando contexto web...`);
 
       let fallbackAnswer = sql;
+      let usedWebFallback = false;
+
       if (TAVILY_KEY) {
         const web = await tavilySearch(query, 4);
         if (web?.results?.length) {
+          usedWebFallback = true;
+
           const webCtx = web.results
             .map((r, i) => `[${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content || ""}`)
             .join("\n\n");
@@ -615,7 +615,7 @@ ${webCtx}`
         confidence: "low",
         sources: [],
         meta: {
-          used_web: !!TAVILY_KEY,
+          used_web: usedWebFallback,
           used_s2: false,
           model_sql: "claude-haiku-4-5-20251001",
           model_answer: "claude-sonnet-4-20250514"
