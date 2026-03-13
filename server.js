@@ -191,6 +191,7 @@ BANCO: brazildatacorp.duckdb | 7B linhas | 41 tabelas | DuckDB
 - ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
 - DATAS VARCHAR em viagens: SUBSTRING("Período - Data de início",1,4) para ano
 - CNAES em array: use array_contains(cnaes_secundarios_codigos, '6201') — NUNCA LIKE em array
+- BUSCA POR NOME DE PESSOA: SEMPRE use ILIKE '%nome%' — NUNCA use = 'nome exato' pois nomes têm variações de grafia
 
 == EMPRESAS RFB — ARQUITETURA (4 tabelas unificadas, todas as UFs) ==
 _rfb_empresas(66M): cnpj_basico(VARCHAR), razao_social, natureza_juridica_codigo, natureza_juridica, qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social(DOUBLE), porte_codigo, porte('MICRO EMPRESA'|'EMPRESA DE PEQUENO PORTE'|'DEMAIS'), ente_federativo
@@ -380,11 +381,18 @@ PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
 
-REGRA DE AUDITORIA — OBRIGATÓRIA:
-Sempre que a tabela consultada tiver colunas _audit_*, inclua no SELECT:
-  _audit_url_download, _audit_data_disponibilizacao_gov, _audit_arquivo_csv_origem, _audit_linha_csv
-Se for agregação (COUNT/SUM/GROUP BY), inclua em subquery ou CTE antes de agregar:
-  MAX(_audit_url_download) as fonte_url, MAX(_audit_data_disponibilizacao_gov) as fonte_data, MAX(_audit_arquivo_csv_origem) as fonte_arquivo
+REGRA DE AUDITORIA — CRÍTICA E OBRIGATÓRIA — NÃO IGNORE:
+As tabelas PT (não RFB) têm colunas _audit_* que DEVEM aparecer no SELECT final.
+Tabelas com _audit_*: _ceis, _cnep, _ceaf, _cepim, _acordos, _despesas_favorecidos, _servidores, _viagens, _renunciasfiscais, _transferencias, _convenios, _licitacoes, _cpgf, _bolsafamilia_pagamentos, _novobolsafamilia, e todas as demais PT.
+
+CASO 1 — SELECT simples (sem GROUP BY): inclua diretamente no SELECT final:
+  _audit_arquivo_csv_origem, _audit_linha_csv, _audit_url_download, _audit_data_disponibilizacao_gov
+
+CASO 2 — Agregação (GROUP BY / COUNT / SUM): inclua na CTE ou subquery que lê a tabela original:
+  MAX(_audit_url_download) as fonte_url,
+  MAX(_audit_data_disponibilizacao_gov) as fonte_data,
+  MAX(_audit_arquivo_csv_origem) as fonte_arquivo
+  E propague essas colunas até o SELECT final.
 
 REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`
       }]
