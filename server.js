@@ -7,6 +7,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createRequire } from "module";
 import crypto from "crypto";
 
+import { classifyDomain } from "./src/core/classifyDomain.js";
+import { classifyQuestionType } from "./src/core/classifyQuestionType.js";
+import { buildPlan } from "./src/core/planner.js";
+import { TABLES_CATALOG } from "./src/catalog/tables.js";
+import { viagens_by_name } from "./src/templates/viagens.js";
+import { sancoes_by_cnpj } from "./src/templates/sancoes.js";
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -57,7 +64,7 @@ const TABLE_KEYWORDS = {
   "_licitacoes": ["licitação", "licitacao", "pregão", "pregao", "dispensa", "concorrência"],
   "_compras": ["compra", "contrato federal", "item compra"],
   "_transferencias": ["transferência", "transferencia", "repasse federal", "fundo a fundo"],
-  "_viagens": ["viagem", "viagens", "diária", "diarias", "diária", "diaria", "passagem", "passagens", "deslocamento", "missão", "missao"],
+  "_viagens": ["viagem", "viagens", "diária", "diarias", "diaria", "passagem", "passagens", "deslocamento", "missão", "missao"],
   "_cpgf": ["cartão corporativo", "cartao corporativo", "cpgf", "cartão governo"],
   "_cpcc": ["cpcc", "cartão combustível"],
   "_cpdc": ["cpdc", "cartão convenio"],
@@ -82,7 +89,6 @@ function getSchemaBlock(query) {
     if (keywords.some((k) => q.includes(k))) matched.add(table);
   }
 
-  // reforços
   if (q.includes("viagem") || q.includes("viagens") || q.includes("passagem") || q.includes("diária") || q.includes("diaria")) {
     matched.add("_viagens");
   }
@@ -537,6 +543,55 @@ function isAnthropicAuthError(message = "") {
   return message.includes("Invalid authentication credentials");
 }
 
+/* ========================= BDC V2 HELPERS ========================= */
+function extractCnpjFromQuery(query) {
+  const digits = (query || "").replace(/\D/g, "");
+  if (digits.length >= 14) return digits.slice(0, 14);
+  return null;
+}
+
+function extractViagensNameFromQuery(query) {
+  const q = (query || "").trim();
+
+  let m = q.match(/viagens?\s+de\s+(.+?)(?:\s+com|\s+dos|\s+das|\s*$)/i);
+  if (m?.[1]) return m[1].trim();
+
+  m = q.match(/últimas?\s+\d+\s+viagens?\s+de\s+(.+?)(?:\s+com|\s+dos|\s+das|\s*$)/i);
+  if (m?.[1]) return m[1].trim();
+
+  return null;
+}
+
+function extractRequestedLimit(query, fallback = 10) {
+  const m = (query || "").match(/\b(\d{1,3})\b/);
+  if (!m) return fallback;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(n, 100);
+}
+
+function buildSqlFromPlan(plan, query) {
+  if (!plan || plan.strategy !== "template") return null;
+
+  switch (plan.template) {
+    case "viagens_by_name": {
+      const name = extractViagensNameFromQuery(query);
+      const limit = extractRequestedLimit(query, 10);
+      if (!name) return null;
+      return viagens_by_name(name, limit);
+    }
+
+    case "sancoes_by_cnpj": {
+      const cnpj = extractCnpjFromQuery(query);
+      if (!cnpj) return null;
+      return sancoes_by_cnpj(cnpj);
+    }
+
+    default:
+      return null;
+  }
+}
+
 /* ========================= MAIN HANDLER ========================= */
 app.post("/chat", async (req, res) => {
   const start = Date.now();
@@ -555,20 +610,55 @@ app.post("/chat", async (req, res) => {
   try {
     console.log(`\n${"=".repeat(60)}\n[${requestId}] ❓ "${query}"\n${"=".repeat(60)}`);
 
+    const domain = classifyDomain(query);
+    const qtype = classifyQuestionType(query);
+    const plan = buildPlan({ domain, qtype, query });
+
+    console.log(`[${requestId}] 🧭 domain: ${domain}`);
+    console.log(`[${requestId}] 🧠 qtype: ${qtype}`);
+    console.log(`[${requestId}] 🗺️ planner strategy: ${plan?.strategy || "unknown"}${plan?.template ? ` | template: ${plan.template}` : ""}`);
+
     const schemaBlock = getSchemaBlock(query);
     if (schemaBlock) {
       const tables = (schemaBlock.match(/^_\w+:/gm) || []).map((t) => t.replace(":", ""));
       console.log(`[${requestId}] 📋 Schema injetado para: ${tables.join(", ")}`);
     }
 
-    console.log(`[${requestId}] 🤖 Claude gerando SQL...`);
+    let sql = null;
 
-    const sqlGen = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1200,
-      messages: [{
-        role: "user",
-        content: `Você é especialista em DuckDB e dados públicos brasileiros.
+    if (plan?.strategy === "template") {
+      sql = buildSqlFromPlan(plan, query);
+
+      if (sql) {
+        sql = cleanGeneratedSql(sql);
+        sql = applySqlAutoFix(sql);
+        sql = addDefaultLimitIfNeeded(sql, query);
+        validateReadOnlySql(sql);
+
+        const templateTableGuess =
+          domain === "viagens" ? "_viagens" :
+          domain === "sancoes" ? "_ceis" :
+          null;
+
+        if (templateTableGuess && TABLES_CATALOG[templateTableGuess]) {
+          console.log(`[${requestId}] 🧩 Template aplicado com catálogo: ${templateTableGuess}`);
+        } else {
+          console.log(`[${requestId}] 🧩 Template aplicado`);
+        }
+      } else {
+        console.log(`[${requestId}] ⚠️ Planner escolheu template, mas parâmetros não puderam ser extraídos. Usando fallback Claude.`);
+      }
+    }
+
+    if (!sql) {
+      console.log(`[${requestId}] 🤖 Claude gerando SQL...`);
+
+      const sqlGen = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1200,
+        messages: [{
+          role: "user",
+          content: `Você é especialista em DuckDB e dados públicos brasileiros.
 
 ${DB_CATALOG}${schemaBlock}
 
@@ -600,26 +690,26 @@ REGRAS ABSOLUTAS:
 - Nunca use tabelas _empresas_UF
 - Em listagens, use LIMIT 100 por padrão, salvo se o usuário pedir explicitamente mais
 - Quando a pergunta envolver servidores de um órgão, prefira JOIN com _servidores se isso melhorar a precisão`
-      }]
-    });
+        }]
+      });
 
-    let sql = sqlGen.content.find((b) => b.type === "text")?.text?.trim() || "";
-    console.log(`[${requestId}] SQL bruto gerado: ${sql}`);
+      sql = sqlGen.content.find((b) => b.type === "text")?.text?.trim() || "";
+      console.log(`[${requestId}] SQL bruto gerado: ${sql}`);
 
-    sql = cleanGeneratedSql(sql);
-    sql = applySqlAutoFix(sql);
-    sql = addDefaultLimitIfNeeded(sql, query);
+      sql = cleanGeneratedSql(sql);
+      sql = applySqlAutoFix(sql);
+      sql = addDefaultLimitIfNeeded(sql, query);
 
-    try {
-      validateReadOnlySql(sql);
-    } catch (validationErr) {
-      console.log(`[${requestId}] ⚠️ SQL inicial falhou na validação: ${validationErr.message}`);
-      const fixForValidation = await anthropic.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1200,
-        messages: [{
-          role: "user",
-          content: `Corrija este SQL DuckDB para ficar estritamente somente leitura e compatível com as regras.
+      try {
+        validateReadOnlySql(sql);
+      } catch (validationErr) {
+        console.log(`[${requestId}] ⚠️ SQL inicial falhou na validação: ${validationErr.message}`);
+        const fixForValidation = await anthropic.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1200,
+          messages: [{
+            role: "user",
+            content: `Corrija este SQL DuckDB para ficar estritamente somente leitura e compatível com as regras.
 
 PERGUNTA: "${query}"
 ${schemaBlock}
@@ -638,15 +728,16 @@ ${sql}
 
 ERRO DE VALIDAÇÃO:
 ${validationErr.message}`
-        }]
-      });
+          }]
+        });
 
-      sql = fixForValidation.content.find((b) => b.type === "text")?.text?.trim() || sql;
-      console.log(`[${requestId}] SQL bruto corrigido pós-validação: ${sql}`);
-      sql = cleanGeneratedSql(sql);
-      sql = applySqlAutoFix(sql);
-      sql = addDefaultLimitIfNeeded(sql, query);
-      validateReadOnlySql(sql);
+        sql = fixForValidation.content.find((b) => b.type === "text")?.text?.trim() || sql;
+        console.log(`[${requestId}] SQL bruto corrigido pós-validação: ${sql}`);
+        sql = cleanGeneratedSql(sql);
+        sql = applySqlAutoFix(sql);
+        sql = addDefaultLimitIfNeeded(sql, query);
+        validateReadOnlySql(sql);
+      }
     }
 
     console.log(`[${requestId}] 📝 SQL: ${sql.substring(0, 300)}`);
@@ -700,8 +791,12 @@ ${webCtx}`
         meta: {
           used_web: usedWebFallback,
           used_s2: false,
-          model_sql: "claude-haiku-4-5-20251001",
-          model_answer: "claude-haiku-4-5-20251001"
+          model_sql: sql ? "template_or_unknown" : "claude-haiku-4-5-20251001",
+          model_answer: "claude-haiku-4-5-20251001",
+          domain,
+          qtype,
+          planner_strategy: plan?.strategy || null,
+          planner_template: plan?.template || null
         }
       });
     }
@@ -730,7 +825,12 @@ ${webCtx}`
         }
 
         console.log(`[${requestId}] ⚠️ Tentativa ${attempt} falhou: ${data.error}`);
-        console.log(`[${requestId}] 🔄 Haiku corrigindo SQL...`);
+
+        if (plan?.strategy === "template") {
+          console.log(`[${requestId}] ⚠️ Template falhou; entrando em fallback Claude para correção...`);
+        } else {
+          console.log(`[${requestId}] 🔄 Haiku corrigindo SQL...`);
+        }
 
         const fix = await anthropic.messages.create({
           model: "claude-haiku-4-5-20251001",
@@ -926,8 +1026,14 @@ Regras:
       meta: {
         used_web: usedWeb,
         used_s2: usedS2,
-        model_sql: "claude-haiku-4-5-20251001",
-        model_answer: answerModel
+        model_sql: plan?.strategy === "template" && buildSqlFromPlan(plan, query)
+          ? "template"
+          : "claude-haiku-4-5-20251001",
+        model_answer: answerModel,
+        domain,
+        qtype,
+        planner_strategy: plan?.strategy || null,
+        planner_template: plan?.template || null
       }
     });
   } catch (err) {
@@ -1022,12 +1128,14 @@ app.get("/health", async (_, res) => {
 
     res.json({
       ok: true,
-      hetzner: r.ok
+      hetzner: r.ok,
+      catalog_tables: Object.keys(TABLES_CATALOG || {}).length
     });
   } catch {
     res.json({
       ok: true,
-      hetzner: false
+      hetzner: false,
+      catalog_tables: Object.keys(TABLES_CATALOG || {}).length
     });
   }
 });
@@ -1037,5 +1145,6 @@ app.listen(PORT, () => {
   console.log("═".repeat(60));
   console.log("🚀 BDC — BRAZILDATACORP");
   console.log(`📡 Porta: ${PORT} | 🗄️ 7B linhas | 41 tabelas`);
+  console.log(`🧩 Catálogo carregado: ${Object.keys(TABLES_CATALOG || {}).length} tabelas`);
   console.log("═".repeat(60));
 });
