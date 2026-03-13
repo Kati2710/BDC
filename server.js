@@ -375,6 +375,13 @@ ${DB_CATALOG}${schemaBlock}
 PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
+
+REGRA DE AUDITORIA — OBRIGATÓRIA:
+Sempre que a tabela consultada tiver colunas _audit_*, inclua no SELECT:
+  _audit_url_download, _audit_data_disponibilizacao_gov, _audit_arquivo_csv_origem, _audit_linha_csv
+Se for agregação (COUNT/SUM/GROUP BY), inclua em subquery ou CTE antes de agregar:
+  MAX(_audit_url_download) as fonte_url, MAX(_audit_data_disponibilizacao_gov) as fonte_data, MAX(_audit_arquivo_csv_origem) as fonte_arquivo
+
 REGRA ABSOLUTA: Responda APENAS com SQL puro — zero palavras antes ou depois, zero explicações, zero markdown, zero blocos de código. A primeira palavra da resposta deve ser SELECT ou WITH.`
       }]
     });
@@ -466,7 +473,7 @@ Responda APENAS com SQL corrigido, sem explicações.` }]
       max_tokens: 2500,
       messages: [{
         role: "user",
-        content: `Você é um analista de dados públicos brasileiros.
+        content: `Você é um analista de dados públicos brasileiros com acesso a fontes rastreáveis até o arquivo original.
 
 PERGUNTA: "${query}"
 
@@ -486,7 +493,21 @@ MAPEAMENTO TABELAS → INSTITUIÇÕES:
 - _convenios* → CGU – SICONV/Transferegov
 - _licitacoes*, _compras* → SEGES – Portal de Compras
 
-Formate valores em R$. Seja preciso e objetivo. Cite fontes com [N].`
+== RASTREABILIDADE — DIFERENCIAL BDC ==
+Os resultados contêm colunas _audit_* com a origem exata de cada dado.
+OBRIGATÓRIO: Use essas colunas para construir citações precisas.
+
+Para cada dado relevante na resposta, cite no formato:
+> 📄 Fonte: [nome_arquivo_csv] • Publicado em [data_disponibilizacao] • Linha [linha_csv]
+> 🔗 Download original: [url_download]
+
+Se os resultados tiverem fonte_url / fonte_arquivo / fonte_data (agregações), use-os da mesma forma.
+
+Ao final, seção **## Fontes** listando todos os arquivos CSV originais citados com suas URLs.
+
+Isso prova que cada número vem de um arquivo oficial do governo — rastreável, verificável, auditável.
+
+Formate valores em R$. Seja preciso e objetivo.`
       }]
     });
 
