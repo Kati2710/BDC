@@ -6,10 +6,9 @@ import { buildSql } from "../core/buildSql.js";
 import { validateSql } from "../core/validateSql.js";
 import { runQuery } from "../core/runQuery.js";
 import { formatAnswer } from "../core/formatAnswer.js";
-import { detectCrossDatasetIntent } from "../core/detectCrossDatasetIntent.js";
-import { buildCrossDatasetSql } from "../core/buildCrossDatasetSql.js";
 import { formatAuditedAnswer } from "../core/formatAuditedAnswer.js";
 import { buildExecutionPlan } from "../core/buildExecutionPlan.js";
+import { buildSqlFromPlan } from "../core/buildSqlFromPlan.js";
 
 export async function handleChat(query) {
   const { normalized } = normalizeQuery(query);
@@ -27,20 +26,13 @@ export async function handleChat(query) {
 
   console.log("🧠 execution plan:", JSON.stringify(plan, null, 2));
 
-  const crossPlan = detectCrossDatasetIntent(normalized, entities);
-
-  if (crossPlan.type === "cross_dataset") {
-    const sql = buildCrossDatasetSql({
-      strategy: crossPlan.strategy,
-      entities,
-      intent,
-      plan
-    });
+  if (plan.mode === "cross_dataset") {
+    const sql = buildSqlFromPlan(plan);
 
     if (!sql) {
       return {
         ok: false,
-        error: "Não foi possível gerar SQL de cruzamento."
+        error: "Não foi possível gerar SQL a partir do plano."
       };
     }
 
