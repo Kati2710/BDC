@@ -57,12 +57,12 @@ const TABLE_KEYWORDS = {
   "_licitacoes": ["licitação", "licitacao", "pregão", "pregao", "dispensa", "concorrência"],
   "_compras": ["compra", "contrato federal", "item compra"],
   "_transferencias": ["transferência", "transferencia", "repasse federal", "fundo a fundo"],
-  "_viagens": ["viagem", "diária", "diaria", "passagem", "deslocamento", "missão"],
+  "_viagens": ["viagem", "viagens", "diária", "diarias", "diária", "diaria", "passagem", "passagens", "deslocamento", "missão", "missao"],
   "_cpgf": ["cartão corporativo", "cartao corporativo", "cpgf", "cartão governo"],
   "_cpcc": ["cpcc", "cartão combustível"],
   "_cpdc": ["cpdc", "cartão convenio"],
-  "_servidores": ["servidor", "servidora", "funcionário federal", "funcionario federal", "cargo federal", "lotação", "remuneração federal", "salário federal"],
-  "_imoveisfuncionais": ["imóvel funcional", "imovel funcional", "residência funcional"],
+  "_servidores": ["servidor", "servidora", "funcionário federal", "funcionario federal", "cargo federal", "lotação", "lotacao", "remuneração federal", "remuneracao federal", "salário federal", "salario federal"],
+  "_imoveisfuncionais": ["imóvel funcional", "imovel funcional", "imóveis funcionais", "imoveis funcionais", "residência funcional", "residencia funcional", "permissionário", "permissionario"],
   "_renunciasfiscais": ["renúncia fiscal", "renuncia fiscal", "benefício fiscal", "isenção fiscal"],
   "_orcamentodadespesa": ["orçamento", "orcamento", "dotação", "loa", "ploa"],
   "_execucaodareceita": ["receita federal", "arrecadação", "arrecadacao", "execução receita"],
@@ -82,12 +82,22 @@ function getSchemaBlock(query) {
     if (keywords.some((k) => q.includes(k))) matched.add(table);
   }
 
+  // reforços
+  if (q.includes("viagem") || q.includes("viagens") || q.includes("passagem") || q.includes("diária") || q.includes("diaria")) {
+    matched.add("_viagens");
+  }
+  if (q.includes("imóvel funcional") || q.includes("imovel funcional") || q.includes("imóveis funcionais") || q.includes("imoveis funcionais")) {
+    matched.add("_imoveisfuncionais");
+  }
+  if (q.includes("servidor") || q.includes("ministério da defesa") || q.includes("ministerio da defesa")) {
+    matched.add("_servidores");
+  }
+
   const empresaKw = [
     "empresa", "cnpj", "razão social", "razao social", "inapt", "baix", "ativ",
     "estabelecimento", "sócio", "socio", "capital social", "cnae", "porte",
     "matriz", "filial", "mei", "microempresa"
   ];
-
   if (empresaKw.some((k) => q.includes(k))) {
     matched.add("_rfb_empresas");
     matched.add("_rfb_estabelecimentos");
@@ -220,7 +230,8 @@ BANCO: brazildatacorp.duckdb | 7B linhas | 41 tabelas | DuckDB
 - BIGINT: só operadores numéricos. VARCHAR: LIKE/=. Aspas duplas em colunas com espaços/acentos.
 - DATAS YYYYMM são BIGINT: WHERE "MÊS COMPETÊNCIA" >= 202401 AND "MÊS COMPETÊNCIA" <= 202412.
 - VALORES monetários são VARCHAR: SUM(CAST(REPLACE(REPLACE(coluna,'.',''),',','.') AS DECIMAL))
-- LIMIT 100 em listagens; sem LIMIT em COUNT/SUM
+- LIMIT 100 em listagens por padrão; use mais apenas se o usuário pedir explicitamente
+- sem LIMIT em COUNT/SUM/AVG/MIN/MAX
 - UNION/UNION ALL: ORDER BY só no final. Use alias numérico (ORDER BY 1,2)
 - WINDOW FUNCTIONS: NUNCA use OVER() em WHERE. Use QUALIFY ou subconsulta
 - BOLSA FAMÍLIA: até 2021→_bolsafamilia_pagamentos; 2022-2025→_novobolsafamilia
@@ -230,10 +241,12 @@ BANCO: brazildatacorp.duckdb | 7B linhas | 41 tabelas | DuckDB
 - ACORDOS: status é "SITUAÇÃO DO ACORDO DE LENIÊNICA". Nome é "RAZÃO SOCIAL – CADASTRO RECEITA"
 - DATAS VARCHAR em viagens: SUBSTRING("Período - Data de início",1,4) para ano
 - CNAES em array: use array_contains(cnaes_secundarios_codigos, '6201') — NUNCA LIKE em array
-- BUSCA POR NOME DE PESSOA: SEMPRE use ILIKE '%nome%' — NUNCA use = 'nome exato' pois nomes têm variações de grafia
-- NUNCA use tabelas antigas _empresas_UF. Use somente _rfb_empresas, _rfb_estabelecimentos, _rfb_socios, _rfb_simples.
+- BUSCA POR NOME DE PESSOA: SEMPRE use ILIKE '%nome%' — NUNCA use = 'nome exato'
+- NUNCA use tabelas antigas _empresas_UF. Use somente _rfb_empresas, _rfb_estabelecimentos, _rfb_socios, _rfb_simples
+- Quando a pergunta mencionar servidores de um órgão e a tabela principal não identificar isso sozinha, prefira JOIN com _servidores
+- Em tabelas PT com _audit_*, sempre inclua _audit_* no SELECT final, ou propague fonte_* em agregações
 
-== EMPRESAS RFB — ARQUITETURA (4 tabelas unificadas, todas as UFs) ==
+== EMPRESAS RFB — ARQUITETURA ==
 _rfb_empresas(66M): cnpj_basico(VARCHAR), razao_social, natureza_juridica_codigo, natureza_juridica, qualificacao_responsavel_codigo, qualificacao_responsavel, capital_social(DOUBLE), porte_codigo, porte('MICRO EMPRESA'|'EMPRESA DE PEQUENO PORTE'|'DEMAIS'), ente_federativo
 _rfb_estabelecimentos(69M): cnpj_basico, cnpj_completo, cnpj_ordem, cnpj_dv, situacao_cadastral('ATIVA'|'BAIXADA'|'INAPTA'|'SUSPENSA'|'NULA'), data_situacao_cadastral, motivo_situacao, motivo_situacao_codigo, nome_fantasia, matriz_filial('MATRIZ'|'FILIAL'), matriz_filial_codigo, cnae_principal_codigo, cnae_principal, cnaes_secundarios_codigos(VARCHAR[]), cnaes_secundarios_descricoes(VARCHAR[]), uf, municipio, municipio_codigo, logradouro, tipo_logradouro, numero, complemento, bairro, cep, ddd_1, telefone_1, ddd_2, telefone_2, correio_eletronico, data_inicio_atividade, situacao_especial, data_situacao_especial, pais, pais_codigo, cidade_exterior
 _rfb_socios(27M): cnpj_basico, nome_socio, cpf_cnpj_socio, identificador_socio, identificador_socio_codigo, qualificacao_socio, qualificacao_socio_codigo, data_entrada_sociedade, pais, pais_codigo, representante_legal, nome_representante, qualificacao_representante_legal, qualificacao_representante_legal_codigo, faixa_etaria, faixa_etaria_codigo
@@ -273,12 +286,11 @@ _servidores(424M total — cadastro+remuneração+afastamentos+jetons):
   cadastro: Id_SERVIDOR_PORTAL,NOME,CPF,MATRICULA,DESCRICAO_CARGO,ORGSUP_LOTACAO,ORG_LOTACAO,TIPO_VINCULO,SITUACAO_VINCULO,UF_EXERCICIO
   remuneração: ANO(VARCHAR),MES(VARCHAR),Id_SERVIDOR_PORTAL,CPF,NOME,"REMUNERAÇÃO BÁSICA BRUTA (R$)","REMUNERAÇÃO APÓS DEDUÇÕES OBRIGATÓRIAS (R$)"
   afastamentos: ANO,MES,Id_SERVIDOR_PORTAL,CPF,NOME,DATA_INICIO_AFASTAMENTO(VARCHAR),DATA_FIM_AFASTAMENTO(VARCHAR)
-  ⚠️ SITUACAO_VINCULO: civis='ATIVO PERMANENTE', militares='MILITAR DA ATIVA'
   ⚠️ Para remuneração completa use tabelas: _servidores + _servidores__2 + _servidores__3 + _servidores__4 + _servidores__5
 
 -- DESPESAS --
 _despesas_favorecidos(114M): "Código Favorecido","Nome Favorecido","Sigla UF","Nome Órgão Superior","Ano e mês do lançamento"(VARCHAR'MM/YYYY'),"Valor Recebido"(VARCHAR)
-_despesasdiarias(594M): colunas variam por ano (107-112) — principais: "Código Empenho","Data Emissão","Órgão Superior","Favorecido","Código Favorecido","Valor do Pagamento Convertido pra R$"
+_despesasdiarias(594M): colunas variam por ano — principais: "Código Empenho","Data Emissão","Órgão Superior","Favorecido","Código Favorecido","Valor do Pagamento Convertido pra R$"
 
 -- VIAGENS --
 _viagens(50M): "Identificador do processo de viagem","CPF viajante","Nome","Cargo","Período - Data de início","Período - Data de fim","Destinos","Valor diárias","Valor passagens"
@@ -286,7 +298,7 @@ _viagens(50M): "Identificador do processo de viagem","CPF viajante","Nome","Carg
 -- SANÇÕES --
 _ceis(22K): "TIPO DE PESSOA","CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE),"DATA FINAL SANÇÃO"(DATE),"ÓRGÃO SANCIONADOR"
 _cnep(2K): mesmo schema +"VALOR DA MULTA"
-_ceAF(4K): "CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE)
+_ceaf(4K): "CPF OU CNPJ DO SANCIONADO","NOME DO SANCIONADO","CATEGORIA DA SANÇÃO","DATA INÍCIO SANÇÃO"(DATE)
 _cepim(4K): "CNPJ ENTIDADE","NOME ENTIDADE","MOTIVO DO IMPEDIMENTO"
 _acordos(298): "CNPJ DO SANCIONADO","RAZÃO SOCIAL – CADASTRO RECEITA","SITUAÇÃO DO ACORDO DE LENIÊNICA","DATA DE INÍCIO DO ACORDO"(DATE)
 
@@ -309,45 +321,18 @@ _renunciasfiscais(3.3M): "Ano-calendário"(BIGINT),CNPJ,"Razão Social","Código
 _notasfiscais(33M): "CHAVE DE ACESSO"(DOUBLE),"DATA EMISSÃO"(TIMESTAMP),"EVENTO","DESCRIÇÃO EVENTO"
 _orcamentodadespesa(332K): "EXERCÍCIO"(BIGINT),"NOME ÓRGÃO SUPERIOR","NOME AÇÃO","ORÇAMENTO INICIAL (R$)","ORÇAMENTO REALIZADO (R$)"
 _execucaodareceita(1.7M): "CÓDIGO ÓRGÃO"(BIGINT),"NOME ÓRGÃO","VALOR PREVISTO ATUALIZADO","VALOR REALIZADO","DATA LANÇAMENTO"(DATE)
-
-== CRUZAMENTOS PRINCIPAIS ==
-
-[CNPJ: due diligence]
-WITH emp AS (
-  SELECT e.cnpj_basico, e.razao_social, e.porte, e.capital_social,
-         est.situacao_cadastral, est.uf, est.municipio, est.cnae_principal,
-         est.data_inicio_atividade
-  FROM _rfb_empresas e
-  JOIN _rfb_estabelecimentos est ON est.cnpj_basico = e.cnpj_basico
-  WHERE est.cnpj_completo = '33000167000101'
-  LIMIT 1
-)
-SELECT 'CADASTRO RFB' as secao, 'Razão Social / Situação / UF' as campo,
-  razao_social || ' | ' || situacao_cadastral || ' | ' || uf as valor FROM emp
-UNION ALL
-SELECT 'SANÇÃO CEIS', 'Categoria', "CATEGORIA DA SANÇÃO"
-FROM _ceis WHERE "CPF OU CNPJ DO SANCIONADO" = '33000167000101'
-UNION ALL
-SELECT 'DESPESAS 2024', 'Total Recebido',
-  CAST(SUM(CAST(REPLACE(REPLACE("Valor Recebido",'.',''),',','.') AS DECIMAL)) AS VARCHAR)
-FROM _despesas_favorecidos
-WHERE "Código Favorecido" = '33000167000101' AND "Ano e mês do lançamento" LIKE '%/2024'
-
-[Servidor + remuneração]
-SELECT c.NOME, c.ORGSUP_EXERCICIO, r."REMUNERAÇÃO BÁSICA BRUTA (R$)"
-FROM _servidores c JOIN _servidores__2 r ON r.Id_SERVIDOR_PORTAL = c.Id_SERVIDOR_PORTAL
-WHERE r.ANO='2024' AND r.MES='12'
-ORDER BY CAST(REPLACE(r."REMUNERAÇÃO BÁSICA BRUTA (R$)",',','.') AS DECIMAL) DESC LIMIT 100
-
-[CEIS × despesas]
-WITH sancionados AS (SELECT DISTINCT "CPF OU CNPJ DO SANCIONADO" as cnpj FROM _ceis WHERE "TIPO DE PESSOA"='J')
-SELECT s.cnpj, SUM(CAST(REPLACE(REPLACE(d."Valor Recebido",'.',''),',','.') AS DECIMAL)) as total
-FROM sancionados s JOIN _despesas_favorecidos d ON d."Código Favorecido" = s.cnpj
-WHERE d."Ano e mês do lançamento" LIKE '%/2024'
-GROUP BY s.cnpj ORDER BY total DESC LIMIT 20
 `;
 
 /* ========================= HELPERS ========================= */
+function cleanGeneratedSql(sql) {
+  return (sql || "")
+    .replace(/```sql\n?/gi, "")
+    .replace(/```/g, "")
+    .trim()
+    .replace(/;+\s*$/, "")
+    .trim();
+}
+
 function applySqlAutoFix(sql) {
   let s = sql || "";
 
@@ -395,8 +380,39 @@ function applySqlAutoFix(sql) {
   return s;
 }
 
+function isListLikeQuery(query) {
+  const q = (query || "").toLowerCase();
+  const listWords = [
+    "mostre", "mostrar", "liste", "listar", "quais são", "quais sao",
+    "últimas", "ultimas", "ultimos", "últimos", "detalhes", "dados completos"
+  ];
+  const aggWords = [
+    "quantos", "qtd", "total", "soma", "somar", "média", "media",
+    "count", "avg", "sum", "mínimo", "minimo", "máximo", "maximo"
+  ];
+  return listWords.some((w) => q.includes(w)) && !aggWords.some((w) => q.includes(w));
+}
+
+function hasExplicitLimit(sql) {
+  return /\blimit\s+\d+\b/i.test(sql || "");
+}
+
+function isAggregateSql(sql) {
+  return /\b(count|sum|avg|min|max)\s*\(/i.test(sql || "");
+}
+
+function addDefaultLimitIfNeeded(sql, query) {
+  const s = (sql || "").trim();
+  if (!s) return s;
+  if (!isListLikeQuery(query)) return s;
+  if (hasExplicitLimit(s)) return s;
+  if (isAggregateSql(s)) return s;
+  return `${s}\nLIMIT 100`;
+}
+
 function validateReadOnlySql(sql) {
-  const normalized = (sql || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const cleaned = cleanGeneratedSql(sql);
+  const normalized = cleaned.replace(/\s+/g, " ").toLowerCase();
 
   if (!(normalized.startsWith("select") || normalized.startsWith("with"))) {
     throw new Error("Apenas consultas SELECT/WITH são permitidas");
@@ -423,14 +439,17 @@ function validateReadOnlySql(sql) {
     /\bcall\b/,
     /\bpragma\b/,
     /\binstall\b/,
-    /\bload\b/,
-    /;/
+    /\bload\b/
   ];
 
   for (const pattern of forbidden) {
     if (pattern.test(normalized)) {
       throw new Error("SQL contém operação não permitida");
     }
+  }
+
+  if (cleaned.includes(";")) {
+    throw new Error("SQL contém múltiplas instruções, o que não é permitido");
   }
 
   return true;
@@ -463,7 +482,10 @@ function maskSensitiveRows(rows = []) {
   return rows.map((row) => {
     const masked = { ...row };
     for (const key of Object.keys(masked)) {
-      if (/(cpf|cnpj)/i.test(key) && (typeof masked[key] === "string" || typeof masked[key] === "number")) {
+      if (
+        /(cpf|cnpj)/i.test(key) &&
+        (typeof masked[key] === "string" || typeof masked[key] === "number")
+      ) {
         masked[key] = maskDocument(masked[key]);
       }
     }
@@ -484,7 +506,12 @@ function extractSources(rows = []) {
     const key = JSON.stringify([arquivo, linha, url, data]);
     if (!seen.has(key) && (arquivo || url || data)) {
       seen.add(key);
-      out.push({ arquivo, linha, url, data_disponibilizacao: data });
+      out.push({
+        arquivo,
+        linha,
+        url,
+        data_disponibilizacao: data
+      });
     }
   }
 
@@ -496,6 +523,18 @@ function computeConfidence({ rowCount, usedWeb, sql }) {
   if (usedWeb && rowCount === 0) return "medium";
   if (rowCount > 0) return "high";
   return "low";
+}
+
+function truncateRowsForExplanation(rows = []) {
+  return rows.slice(0, 15);
+}
+
+function isAnthropicLowCreditError(message = "") {
+  return message.includes("credit balance is too low");
+}
+
+function isAnthropicAuthError(message = "") {
+  return message.includes("Invalid authentication credentials");
 }
 
 /* ========================= MAIN HANDLER ========================= */
@@ -526,7 +565,7 @@ app.post("/chat", async (req, res) => {
 
     const sqlGen = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 3500,
+      max_tokens: 1200,
       messages: [{
         role: "user",
         content: `Você é especialista em DuckDB e dados públicos brasileiros.
@@ -537,34 +576,78 @@ PERGUNTA: "${query}"
 
 Gere o SQL DuckDB para responder esta pergunta.
 
-REGRA DE AUDITORIA — CRÍTICA E OBRIGATÓRIA — NÃO IGNORE:
+REGRA DE AUDITORIA — CRÍTICA E OBRIGATÓRIA:
 As tabelas PT (não RFB) têm colunas _audit_* que DEVEM aparecer no SELECT final.
-Tabelas com _audit_*: _ceis, _cnep, _ceaf, _cepim, _acordos, _despesas_favorecidos, _servidores, _viagens, _renunciasfiscais, _transferencias, _convenios, _licitacoes, _cpgf, _bolsafamilia_pagamentos, _novobolsafamilia, e todas as demais PT.
+Tabelas com _audit_* incluem _ceis, _cnep, _ceaf, _cepim, _acordos, _despesas_favorecidos, _servidores, _viagens, _renunciasfiscais, _transferencias, _convenios, _licitacoes, _cpgf, _bolsafamilia_pagamentos, _novobolsafamilia e outras bases PT.
 
-CASO 1 — SELECT simples (sem GROUP BY): inclua diretamente no SELECT final:
-  _audit_arquivo_csv_origem, _audit_linha_csv, _audit_url_download, _audit_data_disponibilizacao_gov
+CASO 1 — SELECT simples (sem GROUP BY):
+inclua diretamente no SELECT final:
+_audit_arquivo_csv_origem, _audit_linha_csv, _audit_url_download, _audit_data_disponibilizacao_gov
 
-CASO 2 — Agregação (GROUP BY / COUNT / SUM): inclua na CTE ou subquery que lê a tabela original:
-  MAX(_audit_url_download) as fonte_url,
-  MAX(_audit_data_disponibilizacao_gov) as fonte_data,
-  MAX(_audit_arquivo_csv_origem) as fonte_arquivo
-  E propague essas colunas até o SELECT final.
+CASO 2 — Agregação:
+inclua na CTE ou subquery:
+MAX(_audit_url_download) as fonte_url,
+MAX(_audit_data_disponibilizacao_gov) as fonte_data,
+MAX(_audit_arquivo_csv_origem) as fonte_arquivo
+e propague até o SELECT final.
 
-REGRA ABSOLUTA:
-- Responda APENAS com SQL puro.
-- Zero palavras antes ou depois.
-- Zero explicações.
-- Zero markdown.
-- A primeira palavra da resposta deve ser SELECT ou WITH.
-- Somente leitura.
-- Nunca use tabelas _empresas_UF.`
+REGRAS ABSOLUTAS:
+- Responda APENAS com SQL puro
+- Zero explicações
+- Zero markdown
+- A primeira palavra da resposta deve ser SELECT ou WITH
+- Somente leitura
+- Nunca use tabelas _empresas_UF
+- Em listagens, use LIMIT 100 por padrão, salvo se o usuário pedir explicitamente mais
+- Quando a pergunta envolver servidores de um órgão, prefira JOIN com _servidores se isso melhorar a precisão`
       }]
     });
 
     let sql = sqlGen.content.find((b) => b.type === "text")?.text?.trim() || "";
-    sql = sql.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
+    console.log(`[${requestId}] SQL bruto gerado: ${sql}`);
+
+    sql = cleanGeneratedSql(sql);
     sql = applySqlAutoFix(sql);
-    validateReadOnlySql(sql);
+    sql = addDefaultLimitIfNeeded(sql, query);
+
+    try {
+      validateReadOnlySql(sql);
+    } catch (validationErr) {
+      console.log(`[${requestId}] ⚠️ SQL inicial falhou na validação: ${validationErr.message}`);
+      const fixForValidation = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1200,
+        messages: [{
+          role: "user",
+          content: `Corrija este SQL DuckDB para ficar estritamente somente leitura e compatível com as regras.
+
+PERGUNTA: "${query}"
+${schemaBlock}
+
+REGRAS:
+- Responda APENAS com SQL corrigido
+- Sem explicações
+- Sem markdown
+- Permita apenas SELECT ou WITH
+- Nunca use _empresas_UF
+- Em listagens, use LIMIT 100 por padrão
+- Use _audit_* quando a tabela PT tiver essas colunas
+
+SQL:
+${sql}
+
+ERRO DE VALIDAÇÃO:
+${validationErr.message}`
+        }]
+      });
+
+      sql = fixForValidation.content.find((b) => b.type === "text")?.text?.trim() || sql;
+      console.log(`[${requestId}] SQL bruto corrigido pós-validação: ${sql}`);
+      sql = cleanGeneratedSql(sql);
+      sql = applySqlAutoFix(sql);
+      sql = addDefaultLimitIfNeeded(sql, query);
+      validateReadOnlySql(sql);
+    }
 
     console.log(`[${requestId}] 📝 SQL: ${sql.substring(0, 300)}`);
 
@@ -585,8 +668,8 @@ REGRA ABSOLUTA:
             .join("\n\n");
 
           const fallback = await anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 1500,
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 1000,
             messages: [{
               role: "user",
               content: `Pergunta: "${query}"
@@ -618,7 +701,7 @@ ${webCtx}`
           used_web: usedWebFallback,
           used_s2: false,
           model_sql: "claude-haiku-4-5-20251001",
-          model_answer: "claude-sonnet-4-20250514"
+          model_answer: "claude-haiku-4-5-20251001"
         }
       });
     }
@@ -651,7 +734,7 @@ ${webCtx}`
 
         const fix = await anthropic.messages.create({
           model: "claude-haiku-4-5-20251001",
-          max_tokens: 2000,
+          max_tokens: 1200,
           messages: [{
             role: "user",
             content: `Corrija este SQL DuckDB.
@@ -660,10 +743,13 @@ PERGUNTA: "${query}"
 ${schemaBlock}
 
 REGRAS:
-- Responda APENAS com SQL corrigido.
-- Sem explicações.
-- Somente leitura.
-- Nunca use _empresas_UF.
+- Responda APENAS com SQL corrigido
+- Sem explicações
+- Sem markdown
+- Somente leitura
+- Nunca use _empresas_UF
+- Em listagens, use LIMIT 100 por padrão
+- Preserve _audit_* quando existir na tabela PT
 
 SQL COM ERRO:
 ${sqlFinal}
@@ -674,8 +760,11 @@ ${data.error}`
         });
 
         sqlFinal = fix.content.find((b) => b.type === "text")?.text?.trim() || sqlFinal;
-        sqlFinal = sqlFinal.replace(/```sql\n?/g, "").replace(/```/g, "").trim();
+        console.log(`[${requestId}] SQL bruto corrigido na tentativa ${attempt}: ${sqlFinal}`);
+
+        sqlFinal = cleanGeneratedSql(sqlFinal);
         sqlFinal = applySqlAutoFix(sqlFinal);
+        sqlFinal = addDefaultLimitIfNeeded(sqlFinal, query);
         validateReadOnlySql(sqlFinal);
 
         console.log(`[${requestId}] 🔄 SQL corrigido: ${sqlFinal.substring(0, 200)}`);
@@ -687,7 +776,7 @@ ${data.error}`
     sql = sqlFinal;
     const rowCount = Number(data.row_count || 0);
     const rawRows = Array.isArray(data.rows) ? data.rows : [];
-    const safeRows = maskSensitiveRows(rawRows.slice(0, 50));
+    const safeRows = maskSensitiveRows(truncateRowsForExplanation(rawRows));
     const sources = extractSources(rawRows);
 
     console.log(`[${requestId}] 📊 ${rowCount} linhas retornadas`);
@@ -717,9 +806,14 @@ ${data.error}`
 
     console.log(`[${requestId}] 💬 Claude explicando...`);
 
+    const answerModel =
+      rowCount <= 10 && !webContext && !s2Context
+        ? "claude-haiku-4-5-20251001"
+        : "claude-sonnet-4-20250514";
+
     const explanation = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2500,
+      model: answerModel,
+      max_tokens: 1500,
       messages: [{
         role: "user",
         content: `Você é um analista de dados públicos brasileiros com acesso a fontes rastreáveis até o arquivo original.
@@ -753,14 +847,14 @@ Formato de citação:
 Se os resultados tiverem fonte_url / fonte_arquivo / fonte_data, use-os da mesma forma.
 
 Regras:
-- Use apenas os dados presentes em RESULTADOS e nos blocos CONTEXTO WEB / LITERATURA.
-- Não invente colunas, datas, totais, nomes ou interpretações não suportadas.
-- Se um dado não estiver explícito, diga que não foi encontrado.
-- Se houver ambiguidade de pessoa/nome, destaque isso claramente.
-- Mantenha CPFs e CNPJs mascarados na resposta textual.
-- Formate valores em R$.
-- Seja preciso e objetivo.
-- Ao final, inclua seção **## Fontes** listando os arquivos CSV originais citados com suas URLs.`
+- Use apenas os dados presentes em RESULTADOS e nos blocos CONTEXTO WEB / LITERATURA
+- Não invente colunas, datas, totais, nomes ou interpretações não suportadas
+- Se um dado não estiver explícito, diga que não foi encontrado
+- Se houver ambiguidade de pessoa/nome, destaque isso claramente
+- Mantenha CPFs e CNPJs mascarados na resposta textual
+- Formate valores em R$
+- Seja preciso e objetivo
+- Ao final, inclua seção **## Fontes** listando os arquivos CSV originais citados com suas URLs`
       }]
     });
 
@@ -833,10 +927,30 @@ Regras:
         used_web: usedWeb,
         used_s2: usedS2,
         model_sql: "claude-haiku-4-5-20251001",
-        model_answer: "claude-sonnet-4-20250514"
+        model_answer: answerModel
       }
     });
   } catch (err) {
+    const msg = String(err.message || "");
+
+    if (isAnthropicLowCreditError(msg)) {
+      return res.status(402).json({
+        ok: false,
+        error: "Créditos da Anthropic insuficientes. Verifique Plans & Billing da API.",
+        request_id: requestId,
+        duration_ms: Date.now() - start
+      });
+    }
+
+    if (isAnthropicAuthError(msg)) {
+      return res.status(401).json({
+        ok: false,
+        error: "ANTHROPIC_API_KEY inválida ou não reconhecida.",
+        request_id: requestId,
+        duration_ms: Date.now() - start
+      });
+    }
+
     console.error(`[${requestId}] ❌ ERRO:`, err.message);
     return res.status(500).json({
       ok: false,
