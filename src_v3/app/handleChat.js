@@ -6,16 +6,44 @@ import { buildSql } from "../core/buildSql.js";
 import { validateSql } from "../core/validateSql.js";
 import { runQuery } from "../core/runQuery.js";
 import { formatAnswer } from "../core/formatAnswer.js";
+import { detectCrossDatasetIntent } from "../core/detectCrossDatasetIntent.js";
+import { buildCrossDatasetSql } from "../core/buildCrossDatasetSql.js";
+import { formatAuditedAnswer } from "../core/formatAuditedAnswer.js";
 
 export async function handleChat(query) {
-
   const { normalized } = normalizeQuery(query);
 
   const intent = detectIntent(normalized);
-
   const entities = extractEntities(query);
-
   const domain = detectDomain(normalized);
+
+  const crossPlan = detectCrossDatasetIntent(normalized, entities);
+
+  if (crossPlan.type === "cross_dataset") {
+    const sql = buildCrossDatasetSql({
+      strategy: crossPlan.strategy,
+      entities,
+      intent
+    });
+
+    if (!sql) {
+      return {
+        ok: false,
+        error: "Não foi possível gerar SQL de cruzamento."
+      };
+    }
+
+    validateSql(sql);
+
+    const result = await runQuery(sql);
+
+    return formatAuditedAnswer({
+      query,
+      sql,
+      rows: result.rows,
+      rowCount: result.rowCount
+    });
+  }
 
   const sql = buildSql({
     domain,
