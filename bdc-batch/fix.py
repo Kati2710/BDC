@@ -1,0 +1,5 @@
+﻿content = open('/root/bdc-batch/run_findings.py').read()
+print("ANTES:", repr(content[content.find('join(select_parts)')-5:content.find('join(select_parts)')+20]))
+content = content.replace('chr(10).join(select_parts)', '",\\n".join(select_parts)')
+open('/root/bdc-batch/run_findings.py', 'w').write(content)
+print("DEPOIS:", repr(content[content.find('join(select_parts)')-5:content.find('join(select_parts)')+20]))
