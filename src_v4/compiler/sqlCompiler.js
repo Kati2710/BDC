@@ -150,8 +150,29 @@ function buildDetailQuery(plan, joinOn) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+function compileSingleTableSql(plan) {
+  const table  = plan.baseDataset;
+  const meta   = SEMANTIC_CATALOG[table];
+  const topN   = plan.topN || 20;
+  const filter = plan.tableFilter;
+  let where = "";
+  if (filter) {
+    const col = filter.col;
+    const val = String(filter.value || "").replace(/'/g, "''");
+    if (filter.type === "exact") {
+      where = "WHERE \"" + col + "\" = '" + val + "'";
+    } else {
+      where = "WHERE \"" + col + "\" ILIKE '%" + val + "%'";
+    }
+  }
+  const dateField = Object.values(meta.fields || {}).find(f => f.type === "date" || f.type === "month_string");
+  const orderBy = dateField ? "ORDER BY \"" + dateField.column + "\" DESC NULLS LAST" : "";
+  return "SELECT * FROM " + table + " " + where + " " + orderBy + " LIMIT " + topN;
+}
 export function compilePlanToSql(plan) {
   if (!plan?.edge) return null;
+  if (plan.mode === "single_table") return compileSingleTableSql(plan);
   if (plan.mode === "findings") return compileFindingsSql(plan);
   if (plan.mode !== "cross_dataset") return null;
   if (!SEMANTIC_CATALOG[plan.baseDataset] || !SEMANTIC_CATALOG[plan.relatedDataset]) return null;
@@ -163,3 +184,4 @@ export function compilePlanToSql(plan) {
     : buildDetailQuery(plan, joinOn);
   return "WITH base AS (\n  " + baseCte + "\n),\nrel AS (\n  " + relCte + "\n)\n" + finalSql;
 }
+
